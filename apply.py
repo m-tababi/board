@@ -52,6 +52,8 @@ DATE_TITLE_RE = re.compile(r"^\s*\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}\s*[—–]"
 MAX_TASKS = 40
 # New cards per run, as the mod allows.
 MAX_CREATES = 15
+# Existing cards brought into the create-backlog format per run.
+MAX_REWRITES = 15
 MAX_CHECKLIST = 20
 SOURCE_FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}/[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$")
 AZ_TIMEOUT_S = 30
@@ -86,10 +88,12 @@ ACTION_KEYS = {
     "assign": TASK_KEYS,
     "marker": TASK_KEYS | {"marker"},
     "source": TASK_KEYS | {"source"},
+    # An existing card in the create-backlog format: title, priority, description and checklist anew.
+    "rewrite": TASK_KEYS | {"newTitle", "priority", "userStory", "tasks", "acceptanceCriteria"},
     "create": {"n", "action", "evidence", "title", "priority", "userStory", "tasks", "acceptanceCriteria", "source"},
 }
 # The task field each action writes; two rows writing one field of one card are refused.
-FIELD = {"percent": "percent", "move": "bucket", "assign": "assign", "marker": "description", "source": "description"}
+FIELD = {"percent": "percent", "move": "bucket", "assign": "assign", "marker": "description", "source": "description", "rewrite": "description"}
 
 BLOCK_OPEN = "<!-- board -->"
 BLOCK_CLOSE = "<!-- /board -->"
@@ -211,10 +215,10 @@ def _check_source(source):
         raise Refusal("source.heading: unzulässig")
 
 
-def _check_card(row):
-    """The create-backlog fields of a new card; anything off refuses the file."""
+def _check_card(row, title_key="title"):
+    """The create-backlog fields of a new or rewritten card; anything off refuses the file."""
     n = row["n"]
-    title = _text(row["title"], "title", MAX_CREATE_TITLE)
+    title = _text(row[title_key], title_key, MAX_CREATE_TITLE)
     if title != title.strip() or len(title) < 3 or BLOCK_OPEN in title or "<!--" in title or TITLE_MARKUP_RE.search(title) or DATE_TITLE_RE.search(title):
         raise Refusal(f"Zeile {n}: title unzulässig (3-{MAX_CREATE_TITLE} Zeichen, kein Datum, kein Markdown, keine Backticks)")
     if row["priority"] not in PRIORITIES:
@@ -232,7 +236,8 @@ def _check_card(row):
     for item, limit in [(t, 100) for t in tasks] + [(c, 200) for c in criteria]:
         if len(_text(item, "tasks/acceptanceCriteria", limit).strip()) < 3 or item != item.strip():
             raise Refusal(f"Zeile {n}: Eintrag in tasks/acceptanceCriteria zu kurz oder mit Rand")
-    _check_source(row["source"])
+    if title_key == "title":
+        _check_source(row["source"])
 
 
 def source_key(heading):
@@ -244,18 +249,60 @@ def source_line(source):
     return f"<!-- board-src: {source['file']}#{source_key(source['heading'])} -->"
 
 
-def card_details(row):
-    """Description and checklist of a new card, as post-backlog maps a create-backlog entry."""
+def card_body(row):
+    """The description post-backlog writes for a create-backlog entry: priority, story, criteria, tasks past twenty."""
     tasks = row["tasks"]
-    lines = [source_line(row["source"]), "", f"Priority: {row['priority']}", "", row["userStory"], "", "Acceptance Criteria:"]
+    lines = [f"Priority: {row['priority']}", "", row["userStory"], "", "Acceptance Criteria:"]
     lines += [f"- {c}" for c in row["acceptanceCriteria"]]
     if len(tasks) > MAX_CHECKLIST:
         lines += ["", "Remaining tasks:"] + [f"- {t}" for t in tasks[MAX_CHECKLIST:]]
-    checklist = {
-        f"item-{i + 1:02d}": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": t, "isChecked": False, "orderHint": f" {chr(97 + i)}!"}
+    return "\n".join(lines)
+
+
+def checklist_of(tasks, checked=frozenset()):
+    """The first twenty tasks as Planner checklist items; a task whose text is in `checked` stays ticked."""
+    return {
+        f"item-{i + 1:02d}": {
+            "@odata.type": "#microsoft.graph.plannerChecklistItem",
+            "title": t,
+            "isChecked": t.strip().casefold() in checked,
+            "orderHint": f" {chr(97 + i)}!",
+        }
         for i, t in enumerate(tasks[:MAX_CHECKLIST])
     }
-    return {"description": "\n".join(lines), "checklist": checklist}
+
+
+def card_details(row):
+    """Description and checklist of a new card, as post-backlog maps a create-backlog entry."""
+    return {"description": source_line(row["source"]) + "\n\n" + card_body(row), "checklist": checklist_of(row["tasks"])}
+
+
+def rewritten_details(details, row):
+    """An existing card's details in the create-backlog format.
+
+    The board-src line and the board block at the top stay as they are; the rest
+    of the description gives way to the post-backlog body. The checklist is
+    replaced by the tasks (old items not reused are removed); an item whose text
+    a task repeats keeps its tick.
+    """
+    old = details.get("description") or ""
+    head = SOURCE_LINE_RE.match(old)
+    parts = []
+    rest = old
+    if head:
+        parts.append(head.group(0).rstrip("\r\n"))
+        rest = old[head.end() :]
+    block = BLOCK_RE.match(rest)
+    if block:
+        parts.append(block.group(0).rstrip("\r\n"))
+    parts.append(card_body(row))
+    items = details.get("checklist") or {}
+    checked = {str(v.get("title", "")).strip().casefold() for v in items.values() if isinstance(v, dict) and v.get("isChecked") is True}
+    checklist = checklist_of(row["tasks"], checked)
+    for key in items:
+        if key not in checklist:
+            checklist[key] = None
+    return {"description": "\n\n".join(parts), "checklist": checklist}
 
 
 def with_source(description, source):
@@ -291,6 +338,7 @@ def validate(doc, cfg):
         raise Refusal("Benutzer-ID in der Datei: Zuweisungen gehen nur an die ownerId der Konfiguration")
 
     seen_n, seen_field, seen_titles, etags = set(), set(), set(), {}
+    rewrites = 0
     for row in rows:
         if not isinstance(row, dict) or row.get("action") not in ACTION_KEYS:
             raise Refusal(f"Aktion nicht erlaubt: {row.get('action') if isinstance(row, dict) else row!r}")
@@ -316,6 +364,10 @@ def validate(doc, cfg):
             if len(seen_titles) > MAX_CREATES:
                 raise Refusal(f"höchstens {MAX_CREATES} neue Karten je Lauf")
             continue
+        if action == "rewrite":
+            rewrites += 1
+            if rewrites > MAX_REWRITES:
+                raise Refusal(f"höchstens {MAX_REWRITES} neu gefasste Karten je Lauf")
 
         if allowed - set(row):
             raise Refusal(f"Zeile {n}: es fehlen {sorted(allowed - set(row) - {'evidence'})}")
@@ -335,6 +387,8 @@ def validate(doc, cfg):
             _check_marker(row["marker"], cfg)
         if action == "source":
             _check_source(row["source"])
+        if action == "rewrite":
+            _check_card(row, "newTitle")
         key = (row["taskId"], FIELD[action])
         if key in seen_field:
             raise Refusal(f"Zeile {n}: Feld {FIELD[action]} der Karte doppelt")
@@ -542,8 +596,11 @@ def apply(
 
 def _update(graph, group, today, note, outcome, cfg):
     task_id = group[0]["taskId"]
-    task_rows = [r for r in group if r["action"] not in ("marker", "source")]
-    marker_rows = [r for r in group if r["action"] in ("marker", "source")]
+    # A rewrite writes both halves: title and priority with the task, the rest with the details.
+    task_rows = [r for r in group if r["action"] in ("percent", "move", "assign", "rewrite")]
+    marker_rows = [r for r in group if r["action"] in ("marker", "source", "rewrite")]
+    # Rewrites whose task half did not go through: their details stay as they are.
+    held = set()
 
     if task_rows:
         try:
@@ -551,10 +608,12 @@ def _update(graph, group, today, note, outcome, cfg):
         except (RuntimeError, ValueError) as err:
             for r in task_rows:
                 note(r, "error", str(err))
+                held.add(r["n"])
             live = None
         if live is not None and live.get("@odata.etag") != task_rows[0]["etag"]:
             for r in task_rows:
                 note(r, "skipped", "Karte seit dem Abgleich geändert")
+                held.add(r["n"])
         elif live is not None:
             before = set(live.get("assignments") or {})
             body, sent = {}, []
@@ -563,6 +622,13 @@ def _update(graph, group, today, note, outcome, cfg):
                     body["percentComplete"] = r["percent"]
                 elif r["action"] == "move":
                     body["bucketId"] = cfg.buckets[r["bucket"]]
+                elif r["action"] == "rewrite":
+                    if before - {cfg.owner}:
+                        note(r, "skipped", "Karte ist jemand anderem zugewiesen")
+                        held.add(r["n"])
+                        continue
+                    body["title"] = r["newTitle"]
+                    body["priority"] = PRIORITIES[r["priority"]]
                 elif before:
                     note(r, "skipped", "Karte ist schon zugewiesen")
                     continue
@@ -572,19 +638,28 @@ def _update(graph, group, today, note, outcome, cfg):
             if body:
                 result, detail = graph.write("patch", f"/planner/tasks/{task_id}", body, task_rows[0]["etag"])
                 for r in sent:
+                    if r["action"] == "rewrite" and result == "ok":
+                        continue
                     note(r, {"ok": "ok", "conflict": "skipped", "error": "error"}[result], "" if result == "ok" else detail)
+                    held.add(r["n"])
                 if result == "ok":
                     outcome["written"] = True
                     _check_assignments(graph, task_id, before, "assignments" in body, cfg.owner)
 
     for r in marker_rows:
+        if r["n"] in held:
+            continue
         try:
             details = graph.get(f"/planner/tasks/{task_id}/details")
         except (RuntimeError, ValueError) as err:
             note(r, "error", str(err))
             continue
         if details.get("@odata.etag") != r["detailsEtag"]:
-            note(r, "skipped", "Beschreibung seit dem Abgleich geändert")
+            note(r, "skipped", "Beschreibung seit dem Abgleich geändert" + ("; Titel und Priorität schon neu" if r["action"] == "rewrite" else ""))
+            continue
+        if r["action"] == "rewrite":
+            result, detail = graph.write("patch", f"/planner/tasks/{task_id}/details", rewritten_details(details, r), r["detailsEtag"])
+            note(r, "ok" if result == "ok" else "error", "" if result == "ok" else f"Titel und Priorität neu, Beschreibung und Checkliste nicht: {detail}")
             continue
         try:
             old = details.get("description") or ""

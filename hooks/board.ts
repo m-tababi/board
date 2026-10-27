@@ -12,6 +12,8 @@ export const MAX_CREATE_TITLE = 70
 // New cards and pulls into the Sprint Backlog per run.
 export const MAX_CREATES = 15
 export const MAX_SPRINT = 3
+// Existing cards brought into the create-backlog format per run.
+export const MAX_REWRITES = 15
 export const DEFAULT_SKILL_PATH = '~/.claude/skills/create-backlog/SKILL.md'
 // The create-backlog format, as far as a machine can check it (apply.py checks the same).
 export const PRIORITIES = ['Urgent', 'Important', 'Medium', 'Low'] as const
@@ -50,7 +52,7 @@ const BUCKET_LABEL: Record<BucketKey, string> = {
 export const STATUSES = ['open', 'in_progress', 'in_review', 'done', 'outdated', 'superseded', 'blocked'] as const
 export type Status = string
 export const PERCENTS = [0, 50, 100] as const
-const ACTIONS = ['percent', 'move', 'assign', 'marker', 'source', 'create'] as const
+const ACTIONS = ['percent', 'move', 'assign', 'marker', 'source', 'rewrite', 'create'] as const
 export type Action = (typeof ACTIONS)[number]
 
 export const ID_RE = /^[A-Za-z0-9_-]{1,64}$/
@@ -426,8 +428,9 @@ export function systemPrompt(cfg: Config, skill: string | null, hasNextSteps: bo
       : `create: a new card only for an open entry of a backlog file that no card covers: no card has its title (check the done titles too) and no open card carries its <!-- board-src: … --> line. Never invent work: every new card belongs to exactly one backlog entry, and its content comes only from that entry's text. At most ${MAX_CREATES}. The card follows the create-backlog skill below exactly: English, its title rules, a user story "As a developer, I want to … so that ….", priority one of ${PRIORITIES.join(', ')}, tasks, 3 to 5 acceptance criteria. Step 6 of the skill (writing to backlog.md) does not apply: you only fill the fields. The card goes to backlog, unassigned. source.file is the backlog file's name as given before its bracket (e.g. ${cfg.backlogSources[0] === undefined ? 'repo/backlog.md' : `${cfg.backlogSources[0].repo}/${cfg.backlogSources[0].path}`}); source.heading is the entry's heading exactly as it stands after "## ".
 The user story is exactly "${STORY_TEMPLATE}": it starts with the words "As a developer, I want to " (never "I want the", "I want a" or "I want X to"), then "so that", and it ends with a full stop. A full card, as the skill's example reads:
 ${JSON.stringify(EXAMPLE_CARD)}
-Before you answer, check every create against this template field by field: title (plain English, no date, no backticks or markdown), priority, the exact story form, 1 or more tasks, 3 to 5 acceptance criteria. A row that does not fit is dropped unseen; fix it or leave it out.
+Before you answer, check every create and rewrite against this template field by field: title (plain English, no date, no backticks or markdown), priority, the exact story form, 1 or more tasks, 3 to 5 acceptance criteria. A row that does not fit is dropped unseen; fix it or leave it out.
 source: an open card that already covers a backlog entry but has no <!-- board-src: … --> line at the top of its description -> propose source with that entry, instead of a create.
+rewrite: an open card whose isSkillFormat is false is brought into the create-backlog format: give title, priority, userStory, tasks and acceptanceCriteria for it, taken only from the card's own title, description and checklist (and the backlog entry its board-src line names); keep its meaning, invent no work. Keep a task's wording when it is still a task of the card, so its tick carries over. Never for a card assigned to someone else or tied to a PR whose author is not ${cfg.ownerLogin}. At most ${MAX_REWRITES}. Check every rewrite against the template exactly like a create; title, description and checklist of the card are replaced, its <!-- board-src --> line and <!-- board --> block stay.
 
 <create-backlog-skill>
 ${skill}
@@ -459,8 +462,9 @@ Allowed actions, nothing else (no deletion, no renames, no free text on the boar
 - {"action":"assign","taskId":ID,"evidence":E}
 - {"action":"marker","taskId":ID,"marker":{"status":S,"repo":${repos.map(r => JSON.stringify(r)).join('|')},"pr":N,"ref":R},"evidence":E}
 - {"action":"source","taskId":ID,"source":{"file":F,"heading":H},"evidence":E}
+- {"action":"rewrite","taskId":ID,"title":T,"priority":P,"userStory":U,"tasks":[...],"acceptanceCriteria":[...],"evidence":E}
 - {"action":"create","title":T,"priority":P,"userStory":U,"tasks":[...],"acceptanceCriteria":[...],"source":{"file":F,"heading":H},"evidence":E}
-S is one of ${statusesOf(cfg).join(', ')}. In a marker, repo and pr come together or not at all; ref is a repository path, optionally with :line or :from-to (e.g. backlog.md:1869); both optional. One row per action; at most one row per card and field (marker and source both write the description). ID is a taskId exactly as given. Every text field is one line.
+S is one of ${statusesOf(cfg).join(', ')}. In a marker, repo and pr come together or not at all; ref is a repository path, optionally with :line or :from-to (e.g. backlog.md:1869); both optional. One row per action; at most one row per card and field (marker, source and rewrite all write the description). ID is a taskId exactly as given. Every text field is one line.
 E (evidence) is German, at most 200 characters, and names the source: file:line, PR number or changelog version.
 
 At most ${MAX_ROWS} rows; order them by importance. Answer with JSON only, no prose and no code fence: {"rows":[...]}. An empty list is a valid answer.${own}`
@@ -478,6 +482,7 @@ export function promptFor(s: Sources, cfg: Config, nextSteps: string | null = nu
       assigned: c.assigned,
       checklist: c.details?.checklist ?? [],
       description: (c.details?.description ?? '').slice(0, 3000),
+      isSkillFormat: isSkillFormat(c),
     }))
   const done = s.cards.filter(c => c.bucket === 'done').map(c => c.title)
   const prs = s.prs.map(p => ({
@@ -532,6 +537,20 @@ export type Row =
   | { n: number; action: 'source'; taskId: string; title: string; etag: string; detailsEtag: string; source: Source; evidence: string }
   | {
       n: number
+      action: 'rewrite'
+      taskId: string
+      title: string
+      etag: string
+      detailsEtag: string
+      newTitle: string
+      priority: (typeof PRIORITIES)[number]
+      userStory: string
+      tasks: string[]
+      acceptanceCriteria: string[]
+      evidence: string
+    }
+  | {
+      n: number
       action: 'create'
       title: string
       priority: (typeof PRIORITIES)[number]
@@ -580,9 +599,10 @@ const MODEL_KEYS: Record<Action, string[]> = {
   assign: ['action', 'taskId', 'evidence'],
   marker: ['action', 'taskId', 'marker', 'evidence'],
   source: ['action', 'taskId', 'source', 'evidence'],
+  rewrite: ['action', 'taskId', 'title', 'priority', 'userStory', 'tasks', 'acceptanceCriteria', 'evidence'],
   create: ['action', 'title', 'priority', 'userStory', 'tasks', 'acceptanceCriteria', 'source', 'evidence'],
 }
-const FIELD: Record<Exclude<Action, 'create'>, string> = { percent: 'percent', move: 'bucket', assign: 'assign', marker: 'description', source: 'description' }
+const FIELD: Record<Exclude<Action, 'create'>, string> = { percent: 'percent', move: 'bucket', assign: 'assign', marker: 'description', source: 'description', rewrite: 'description' }
 
 // One line of plain text, no controls, within its length; what apply.py's _text takes.
 function isLine(value: unknown, min: number, max: number): value is string {
@@ -603,6 +623,28 @@ function sourceFrom(raw: unknown, ctx: Context): (Source & { key: string; entry:
 }
 
 /** The create-backlog fields of a new card, or why they do not hold (apply.py checks the same). */
+// The body post-backlog writes below the board-src line and the board block.
+const SKILL_BODY_RE = /^Priority: (Urgent|Important|Medium|Low)\r?\n\r?\nAs a developer, I want to .{5,} so that .{5,}\.\r?\n\r?\nAcceptance Criteria:(\r?\n- [^\r\n]{3,}){3,5}(\r?\n\r?\nRemaining tasks:(\r?\n- [^\r\n]+)+)?\s*$/
+
+/** Whether a card already reads as the create-backlog skill writes it: its title and its description. */
+export function isSkillFormat(card: Card): boolean {
+  const description = card.details?.description ?? ''
+  const head = SOURCE_LINE_RE.exec(description)?.[0] ?? ''
+  const rest = description.slice(head.length)
+  const block = /^<!-- board -->\r?\n[\s\S]*?\r?\n<!-- \/board -->(?:\r?\n){0,2}/.exec(rest)?.[0] ?? ''
+  const title = card.title
+  const isTitle = isLine(title, 3, MAX_CREATE_TITLE) && !TITLE_MARKUP_RE.test(title) && !DATE_TITLE_RE.test(title)
+  return isTitle && SKILL_BODY_RE.test(rest.slice(block.length))
+}
+
+/** The PR a card's board block names (STATUS … · PR repo#nr), if any. */
+function prOfCard(card: Card): Marker | undefined {
+  const head = SOURCE_LINE_RE.exec(card.details?.description ?? '')?.[0] ?? ''
+  const inside = BLOCK_RE.exec((card.details?.description ?? '').slice(head.length))?.[1] ?? ''
+  const found = / · PR ([A-Za-z0-9_.-]{1,40})#(\d{1,5})(?: |$)/.exec(inside)
+  return found === null ? undefined : { status: 'open', repo: found[1] as string, pr: Number(found[2]) }
+}
+
 function cardFieldsError(r: Record<string, unknown>): string | null {
   if (!isLine(r.title, 3, MAX_CREATE_TITLE) || r.title.includes('<!--') || TITLE_MARKUP_RE.test(r.title) || DATE_TITLE_RE.test(r.title)) {
     return `Titel 3–${MAX_CREATE_TITLE} Zeichen, ohne Datum, Markdown und Backticks`
@@ -679,6 +721,7 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
   const sources = new Set(cards.map(c => sourceOf(c.details?.description ?? '')).filter((x): x is string => x !== null))
   let creates = 0
   let sprints = 0
+  let rewrites = 0
 
   for (const [i, item] of ((raw as { rows: unknown[] }).rows).entries()) {
     const at = `Vorschlag ${i + 1}`
@@ -815,6 +858,48 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
       }
       row = { ...base, action }
       assigns.push({ row, card })
+    } else if (action === 'rewrite') {
+      // Only the owner's or a free card, not tied to someone else's PR, not yet in the format.
+      if (!ctx.hasSkill) {
+        drop(at, r, `neu fassen gesperrt (Skill-Datei create-backlog nicht lesbar)`)
+        continue
+      }
+      if (card.assigned === 'someone_else') {
+        drop(at, r, `Karte ist jemand anderem zugewiesen`)
+        continue
+      }
+      if (foreignPr(prOfCard(card), prs, cfg)) {
+        drop(at, r, `Karte gehört zu fremdem PR`)
+        continue
+      }
+      if (isSkillFormat(card)) {
+        drop(at, r, `Karte ist schon im Skill-Format`)
+        continue
+      }
+      const wrong = cardFieldsError(r)
+      if (wrong !== null) {
+        drop(at, r, `${wrong}`)
+        continue
+      }
+      const newTitle = r.title as string
+      if (cards.some(c => c.id !== card.id && c.title.trim().toLowerCase() === newTitle.toLowerCase())) {
+        drop(at, r, `eine andere Karte trägt diesen Titel schon`)
+        continue
+      }
+      if (rewrites >= MAX_REWRITES) {
+        drop(at, r, `mehr als ${MAX_REWRITES} neu gefasste Karten`)
+        continue
+      }
+      rewrites += 1
+      row = {
+        ...base,
+        action,
+        newTitle,
+        priority: r.priority as (typeof PRIORITIES)[number],
+        userStory: r.userStory as string,
+        tasks: [...(r.tasks as string[])],
+        acceptanceCriteria: [...(r.acceptanceCriteria as string[])],
+      }
     } else if (action === 'source') {
       if (sourceOf(card.details.description) !== null) {
         drop(at, r, `Karte hat schon eine Quellzeile`)
@@ -935,6 +1020,8 @@ export function actionLabel(row: Row): string {
       return markerLabel(row.marker)
     case 'source':
       return 'Quelle setzen'
+    case 'rewrite':
+      return `neu fassen (${row.priority})`
     case 'create':
       return `neu in Backlog (${row.priority})`
   }
@@ -988,6 +1075,32 @@ function cardLines(row: Extract<Row, { action: 'create' }>, entry: Entry | undef
   ]
 }
 
+/** Old against new for a rewrite: title, description and checklist as they stand, then as they will. */
+function rewriteLines(row: Extract<Row, { action: 'rewrite' }>, card: Card | undefined): string[] {
+  const old = card?.details
+  const checked = new Set((old?.checklist ?? []).filter(i => i.isChecked).map(i => i.title.trim().toLowerCase()))
+  return [
+    'Alt:',
+    `  ${clean(card?.title ?? row.title, 120)}`,
+    ...(old?.description ?? '')
+      .split('\n')
+      .filter(l => l.trim() !== '')
+      .slice(0, 12)
+      .map(l => `  ${clean(l, 160)}`),
+    ...(old?.checklist ?? []).map(i => `  ${i.isChecked ? '[x]' : '[ ]'} ${clean(i.title, 100)}`),
+    'Neu:',
+    `  ${clean(row.newTitle, 70)}`,
+    `  Priority: ${row.priority}`,
+    `  ${clean(row.userStory, 300)}`,
+    '  Acceptance Criteria:',
+    ...row.acceptanceCriteria.map(c => `  - ${clean(c, 200)}`),
+    '  Checkliste:',
+    ...row.tasks.slice(0, 20).map(t => `  ${checked.has(t.trim().toLowerCase()) ? '[x]' : '[ ]'} ${clean(t, 100)}`),
+    ...(row.tasks.length > 20 ? ['  Remaining tasks (in der Beschreibung):', ...row.tasks.slice(20).map(t => `  - ${clean(t, 100)}`)] : []),
+    '  (board-src-Zeile und Markerblock bleiben oben stehen)',
+  ]
+}
+
 export function paneRows(rows: Row[], cards: Card[], entries: Entry[] = []): PaneRow[] {
   const byId = new Map(cards.map(c => [c.id, c]))
   return rows.map(row => {
@@ -1015,6 +1128,11 @@ export function paneRows(rows: Row[], cards: Card[], entries: Entry[] = []): Pan
       case 'source':
         after = `Quellzeile ${row.source.file} › ${clean(row.source.heading, 80)}`
         detail = [`Quelle: ${row.source.file} › ${clean(row.source.heading, 120)}`, ...(entries.find(e => e.file === row.source.file && e.heading === row.source.heading)?.lines ?? []).map(l => `  ${l}`)]
+        break
+      case 'rewrite':
+        before = clean(card?.title ?? row.title, 80)
+        after = clean(row.newTitle, 80)
+        detail = rewriteLines(row, card)
         break
       case 'create':
         after = 'neue Karte in Backlog'

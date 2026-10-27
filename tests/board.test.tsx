@@ -15,6 +15,8 @@ import {
   isApplyCall,
   markerFields,
   markerIsCurrent,
+  isSkillFormat,
+  paneRows,
   entriesOf,
   nextStepsOf,
   normalTitle,
@@ -644,6 +646,127 @@ describe('new cards in the create-backlog format', () => {
   })
 })
 
+describe('rewriting old cards into the skill format', () => {
+  const FORMAT_BODY = `Priority: Medium\n\n${STORY}\n\nAcceptance Criteria:\n- ${CRITERIA.join('\n- ')}`
+  const oldCard = (id: string, extra: Partial<Card> = {}, description = 'Old free text\nmore'): Card => ({
+    id,
+    title: `old card ${id}`,
+    bucket: 'backlog',
+    percent: 0,
+    assigned: 'none',
+    etag: `W/"${id}"`,
+    details: { etag: `W/"${id}d"`, description, checklist: [{ title: 'Add a cache folder per input', isChecked: true }] },
+    ...extra,
+  })
+  const prs: Pr[] = [
+    { repo: 'alpha', number: 133, title: 't', author: 'someone', state: 'OPEN', isDraft: false, mergedAt: null, updatedAt: '', branch: '' },
+    { repo: 'alpha', number: 174, title: 't', author: 'owner-login', state: 'OPEN', isDraft: false, mergedAt: null, updatedAt: '', branch: '' },
+  ]
+  const fix = (taskId: string, extra: Record<string, unknown> = {}) => {
+    const { source: _source, ...fields } = create(extra)
+    return { ...fields, action: 'rewrite', taskId }
+  }
+  const check = (rows: unknown[], cards: Card[], ctx: Context = NO_CONTEXT) => {
+    const checked = checkProposal({ rows }, cards, prs, CFG, ctx)
+    if (typeof checked === 'string') throw new Error(checked)
+    return checked
+  }
+
+  test('a card off the format is rewritten with the create fields; title, etags and id come from the read', () => {
+    const { rows, dropped } = check([fix('R1')], [oldCard('R1')])
+    expect(dropped).toEqual([])
+    expect(rows).toEqual([
+      {
+        n: 1,
+        action: 'rewrite',
+        taskId: 'R1',
+        title: 'old card R1',
+        etag: 'W/"R1"',
+        detailsEtag: 'W/"R1d"',
+        newTitle: 'Cache the Parsed Pages',
+        priority: 'Important',
+        userStory: STORY,
+        tasks: ['Add a cache folder per input', 'Key entries by the input hash'],
+        acceptanceCriteria: CRITERIA,
+        evidence: 'alpha/backlog.md:3',
+      },
+    ])
+  })
+
+  test('the skill format is told from title and description, past the source line and the board block', () => {
+    const head = '<!-- board-src: alpha/backlog.md#0123456789ab -->\n\n<!-- board -->\nSTATUS 2026-10-01: open\n<!-- /board -->\n\n'
+    expect(isSkillFormat(oldCard('F1', { title: 'Cache the Parsed Pages' }, head + FORMAT_BODY))).toBe(true)
+    expect(isSkillFormat(oldCard('F2', { title: 'Cache the Parsed Pages' }, FORMAT_BODY + '\n\nRemaining tasks:\n- One more'))).toBe(true)
+    expect(isSkillFormat(oldCard('F3', { title: 'Cache the `Parsed` Pages' }, FORMAT_BODY))).toBe(false)
+    expect(isSkillFormat(oldCard('F4', { title: 'Cache the Parsed Pages' }, FORMAT_BODY.replace('I want to', 'I want the')))).toBe(false)
+    expect(isSkillFormat(oldCard('F5', { title: 'Cache the Parsed Pages' }, 'Free text'))).toBe(false)
+  })
+
+  test('never for a card in the format, held by someone else or tied to someone else’s PR', () => {
+    const inFormat = oldCard('F1', { title: 'Cache the Parsed Pages Now' }, FORMAT_BODY)
+    const held = oldCard('H1', { assigned: 'someone_else' })
+    const theirs = oldCard('P1', {}, '<!-- board -->\nSTATUS 2026-10-01: in review · PR alpha#133\n<!-- /board -->\n\nOld')
+    const mine = oldCard('P2', {}, '<!-- board -->\nSTATUS 2026-10-01: in review · PR alpha#174\n<!-- /board -->\n\nOld')
+    const { rows, dropped } = check(
+      [fix('F1', { title: 'Another Title' }), fix('H1', { title: 'Title Two' }), fix('P1', { title: 'Title Three' }), fix('P2', { title: 'Title Four' })],
+      [inFormat, held, theirs, mine],
+    )
+    expect(rows.map(r => ('taskId' in r ? r.taskId : ''))).toEqual(['P2'])
+    expect(dropped).toEqual([
+      'Vorschlag 1: Karte ist schon im Skill-Format',
+      'Vorschlag 2: Karte ist jemand anderem zugewiesen',
+      'Vorschlag 3: Karte gehört zu fremdem PR',
+    ])
+  })
+
+  test('the same format rules as a create, a title of another card, at most fifteen, no skill file', () => {
+    const cards = Array.from({ length: 17 }, (_, i) => oldCard(`R${i}`))
+    for (const bad of [
+      fix('R0', { userStory: 'As a developer, I want the cache so that reruns are fast.' }),
+      fix('R0', { title: '2026-10-20 — Cache the Parsed Pages' }),
+      fix('R0', { acceptanceCriteria: CRITERIA.slice(0, 2) }),
+      fix('R0', { tasks: [] }),
+      fix('R0', { priority: 'Must' }),
+      fix('R0', { title: 'old card R1' }),
+      { ...fix('R0'), source: { file: 'alpha/backlog.md', heading: CACHE } },
+    ]) {
+      const { rows, dropped } = check([bad], cards)
+      expect([bad, rows]).toEqual([bad, []])
+      expect(dropped).toHaveLength(1)
+    }
+    const many = check(cards.map((c, i) => fix(c.id, { title: `Fresh Title ${i}` })), cards)
+    expect(many.rows).toHaveLength(15)
+    expect(many.dropped).toEqual(['Vorschlag 16: mehr als 15 neu gefasste Karten', 'Vorschlag 17: mehr als 15 neu gefasste Karten'])
+    expect(check([fix('R0')], cards, { ...NO_CONTEXT, hasSkill: false }).dropped[0]).toContain('gesperrt')
+  })
+
+  test('the pane shows old against new, ticks carried over by text', () => {
+    const card = oldCard('R1')
+    const { rows } = check([fix('R1')], [card])
+    const [shown] = paneRows(rows, [card])
+    expect(shown?.change).toBe('neu fassen (Important)')
+    expect(shown?.before).toBe('old card R1')
+    expect(shown?.after).toBe('Cache the Parsed Pages')
+    expect(shown?.detail).toEqual([
+      'Alt:',
+      '  old card R1',
+      '  Old free text',
+      '  more',
+      '  [x] Add a cache folder per input',
+      'Neu:',
+      '  Cache the Parsed Pages',
+      '  Priority: Important',
+      `  ${STORY}`,
+      '  Acceptance Criteria:',
+      ...CRITERIA.map(c => `  - ${c}`),
+      '  Checkliste:',
+      '  [x] Add a cache folder per input',
+      '  [ ] Key entries by the input hash',
+      '  (board-src-Zeile und Markerblock bleiben oben stehen)',
+    ])
+  })
+})
+
 describe('the Sprint Backlog', () => {
   const backlogCard = (id: string): Card => ({
     id,
@@ -1192,7 +1315,7 @@ describe('a board run in the pane', () => {
     // The exact story form and one full card, with the order to check every create against them.
     expect(seen.prompts[0]?.system).toContain('The user story is exactly "As a developer, I want to <goal> so that <value>."')
     expect(seen.prompts[0]?.system).toContain('"userStory":"As a developer, I want to set up Qdrant as the local vector store')
-    expect(seen.prompts[0]?.system).toContain('Before you answer, check every create against this template')
+    expect(seen.prompts[0]?.system).toContain('Before you answer, check every create and rewrite against this template')
     expect(seen.prompts[0]?.prompt).toContain('## Next steps (the stand file\'s section)\nWrite the parser docs next.')
     await view.press({ key: 'row:1' })
     const open = await until(seen, view, `Quelle: alpha/backlog.md › ${CACHE}`)

@@ -100,7 +100,7 @@ class FakeGraph:
         is_details = len(parts) == 4 and parts[3] == "details"
         if method == "get":
             if is_details:
-                return 0, json.dumps({"description": task["description"], "@odata.etag": task["detailsEtag"]}), ""
+                return 0, json.dumps({"description": task["description"], "checklist": task.get("checklist", {}), "@odata.etag": task["detailsEtag"]}), ""
             return 0, json.dumps(self.task_view(task)), ""
         if method == "patch":
             if self.before_patch is not None:
@@ -114,11 +114,20 @@ class FakeGraph:
             self.writes.append(("patch-details" if is_details else "patch-task", parts[2], body))
             if is_details:
                 task["description"] = body["description"]
-                task["checklist"] = body.get("checklist", task.get("checklist", {}))
+                # Graph merges a checklist PATCH: a key set to null goes, the others are set.
+                merged = dict(task.get("checklist", {}))
+                for key, item in body.get("checklist", {}).items():
+                    if item is None:
+                        merged.pop(key, None)
+                    else:
+                        merged[key] = item
+                task["checklist"] = merged
                 task["detailsEtag"] = self.etag("details")
             else:
                 if "percentComplete" in body:
                     task["percentComplete"] = body["percentComplete"]
+                if "title" in body:
+                    task["title"] = body["title"]
                 if "bucketId" in body:
                     task["bucketId"] = body["bucketId"]
                 for user in body.get("assignments", {}):
@@ -636,6 +645,121 @@ class NewCards(Base):
         out = self.run_apply(g, [row(1, "source", source=SOURCE), row(2, "marker", marker=MARKER)], [1, 2])
         self.assertEqual(out["status"], "aborted")
         self.assertIn("doppelt", out["reason"])
+
+
+def rewrite(n=1, tid=T1, **extra):
+    """An existing card brought into the create-backlog format."""
+    value = row(n, "rewrite", tid)
+    value.update(
+        {
+            "newTitle": "Cache the Parsed Pages",
+            "priority": "Important",
+            "userStory": STORY,
+            "tasks": ["Add a cache folder per input", "Key entries by the input hash"],
+            "acceptanceCriteria": list(CRITERIA),
+        }
+    )
+    value.update(extra)
+    return value
+
+
+OLD_CHECKLIST = {
+    "a1": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": "add a cache folder per input ", "isChecked": True, "orderHint": " !"},
+    "b2": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": "A task that went", "isChecked": True, "orderHint": " !!"},
+}
+
+
+class Rewrites(Base):
+    """A rewrite puts an existing card into the create-backlog format."""
+
+    def old_card(self, **extra):
+        old = task(
+            T1,
+            title="cache pages (todo)",
+            description="<!-- board-src: alpha/backlog.md#0123456789ab -->\n\n<!-- board -->\nSTATUS 2026-10-01: open · PR alpha#133\n<!-- /board -->\n\nOld free text\nwith lines",
+            **extra,
+        )
+        old["checklist"] = dict(OLD_CHECKLIST)
+        return old
+
+    def test_a_rewrite_goes_out_as_two_patches_keeping_source_line_and_marker(self):
+        g = FakeGraph([self.old_card()])
+        out = self.run_apply(g, [rewrite()], [1])
+        self.assertEqual(out["status"], "ok")
+        self.assertEqual(self.results(out), {1: "ok"})
+        [(kind1, tid1, task_body), (kind2, tid2, details_body)] = g.writes
+        self.assertEqual((kind1, tid1, task_body), ("patch-task", T1, {"title": "Cache the Parsed Pages", "priority": 3}))
+        self.assertEqual((kind2, tid2), ("patch-details", T1))
+        self.assertEqual(
+            details_body["description"],
+            "<!-- board-src: alpha/backlog.md#0123456789ab -->\n\n"
+            "<!-- board -->\nSTATUS 2026-10-01: open · PR alpha#133\n<!-- /board -->\n\n"
+            "Priority: Important\n\n"
+            f"{STORY}\n\n"
+            "Acceptance Criteria:\n- A rerun reads pages from the cache\n- A changed input invalidates its entry\n- The cache folder is documented",
+        )
+        self.assertEqual(
+            details_body["checklist"],
+            {
+                "item-01": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": "Add a cache folder per input", "isChecked": True, "orderHint": " a!"},
+                "item-02": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": "Key entries by the input hash", "isChecked": False, "orderHint": " b!"},
+                "a1": None,
+                "b2": None,
+            },
+        )
+        # On the board: the old items are gone, the tick carried over by text.
+        self.assertEqual(sorted(g.tasks[T1]["checklist"]), ["item-01", "item-02"])
+        self.assertEqual(g.tasks[T1]["title"], "Cache the Parsed Pages")
+        # Each PATCH went with the etag read before it.
+        patches = [c for c in g.calls if "patch" in c]
+        self.assertIn(f'If-Match=W/"t-{T1}"', patches[0])
+        self.assertIn(f'If-Match=W/"d-{T1}"', patches[1])
+
+    def test_a_card_without_line_or_block_gets_the_plain_body_and_more_than_twenty_tasks_overflow(self):
+        g = FakeGraph([task(T1, description="Just text")])
+        tasks = [f"Task number {i}" for i in range(1, 23)]
+        self.run_apply(g, [rewrite(tasks=tasks)], [1])
+        body = g.writes[1][2]
+        self.assertTrue(body["description"].startswith("Priority: Important\n\n"))
+        self.assertTrue(body["description"].endswith("\n\nRemaining tasks:\n- Task number 21\n- Task number 22"))
+        self.assertEqual(len(body["checklist"]), 20)
+
+    def test_a_card_someone_else_holds_is_left_alone(self):
+        g = FakeGraph([self.old_card(assignments=[OTHER])])
+        out = self.run_apply(g, [rewrite()], [1])
+        self.assertEqual(self.results(out), {1: "skipped"})
+        self.assertEqual(g.writes, [])
+
+    def test_a_changed_card_is_skipped_whole(self):
+        changed = self.old_card()
+        changed["etag"] = 'W/"someone-else"'
+        g = FakeGraph([changed])
+        out = self.run_apply(g, [rewrite()], [1])
+        self.assertEqual(self.results(out), {1: "skipped"})
+        self.assertEqual(g.writes, [])
+
+    def test_a_move_and_a_rewrite_of_one_card_share_one_task_patch(self):
+        g = FakeGraph([self.old_card()])
+        out = self.run_apply(g, [row(1, "move", bucket="in_review"), rewrite(n=2)], [1, 2])
+        self.assertEqual(self.results(out), {1: "ok", 2: "ok"})
+        self.assertEqual(g.writes[0][2], {"bucketId": BUCKETS["in_review"], "title": "Cache the Parsed Pages", "priority": 3})
+
+    def test_a_rewrite_off_the_format_or_beside_a_marker_refuses_the_file(self):
+        for rows in (
+            [rewrite(userStory="As a developer, I want the cache so that reruns are fast.")],
+            [rewrite(newTitle="2026-10-20 — Cache the Parsed Pages")],
+            [rewrite(acceptanceCriteria=CRITERIA[:2])],
+            [rewrite(tasks=[])],
+            [rewrite(priority="Must")],
+            [{k: v for k, v in rewrite().items() if k != "userStory"}],
+            [rewrite(source=SOURCE)],
+            [rewrite(), row(2, "marker", marker=MARKER)],
+            [rewrite(n=i, tid=f"Task{i:020d}") for i in range(1, 17)],
+        ):
+            g = FakeGraph([self.old_card()])
+            out = self.run_apply(g, rows, [1])
+            self.assertEqual(out["status"], "aborted", rows[0])
+            self.assertEqual(g.writes, [])
 
 
 class Confirmation(Base):
