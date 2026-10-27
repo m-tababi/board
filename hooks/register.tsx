@@ -353,9 +353,18 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
   const isComplete = sources.unreadable === 0
   if (!isComplete && !hasSurface) log($, `Board: Achtung – ${sources.unreadable} Karte(n) unlesbar, nicht bewertet.`)
 
-  if (hasSurface) await setPhase($, 'thinking')
-  $.ui.status('▦ Board: Opus bewertet …')
+  // Made before the phase shows, so an Abbrechen from here on always has a call to cut.
   stop = new AbortController()
+  if (isCancelled) {
+    // Cancelled while still collecting: nothing judged, no review, no model call.
+    return { text: 'Board-Abgleich abgebrochen.', isHeld: false }
+  }
+  if (hasSurface) await setPhase($, 'thinking')
+  if (isCancelled || stop.signal.aborted) {
+    await stampReview($, isComplete, now)
+    return { text: 'Board-Abgleich abgebrochen.', isHeld: false }
+  }
+  $.ui.status('▦ Board: Opus bewertet …')
   const reply = await $.model.complete(
     { model: 'opus', effort: 'medium', system: systemPrompt(cfg, sources.skill, sources.nextSteps !== null), prompt, maxTokens: MAX_TOKENS, timeoutMs: MODEL_TIMEOUT_MS },
     { signal: stop.signal },
@@ -475,6 +484,7 @@ async function cancel($: EngineInterface, isClosing: boolean): Promise<void> {
     // The run ends itself: after the read (no review), or as the model call returns aborted.
     isCancelled = true
     stop?.abort()
+    stopTicker()
     await setPhase($, 'idle')
   } else if (now === 'ready') {
     const held = pending

@@ -969,6 +969,24 @@ describe('a board run in the pane', () => {
     expect(seen.closed).toEqual(['board-update'])
   })
 
+  test('Abbrechen while collecting never calls the model and is no review', async ($, on) => {
+    const seen = world(on, { slow: { az: 3000 } })
+    await start($, false)
+    await board($)
+    const view = await pane($)
+    await until(seen, view, 'Sammelt')
+
+    await view.press({ key: 'cancel' })
+    await seen.clock.advance(10_000)
+    await settled(seen)
+
+    expect(seen.prompts).toEqual([])
+    expect(seen.store.lastRunAt).toBeUndefined()
+    expect(seen.closed).toEqual(['board-update'])
+    // The pill is free again.
+    expect(await board($)).toBe('Board-Abgleich gestartet – Fenster „Board Update“.')
+  })
+
   test('Abbrechen with the proposals shown runs nothing and counts as a review', async ($, on) => {
     const seen = world(on)
     await start($, false)
