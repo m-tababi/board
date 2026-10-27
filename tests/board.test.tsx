@@ -114,6 +114,7 @@ const task = (id: string, title: string, bucket: BucketKey, assignees: string[] 
   bucketId: BUCKETS[bucket],
   percentComplete: bucket === 'done' ? 100 : 0,
   assignments: Object.fromEntries(assignees.map(a => [a, {}])),
+  createdBy: { user: { id: ME } },
   '@odata.etag': `W/"t${id}"`,
 })
 const TASKS = [
@@ -343,9 +344,9 @@ describe('pill width', () => {
 
 describe('proposal check', () => {
   const cards: Card[] = [
-    { id: 'A1', title: 'Open', bucket: 'in_progress', percent: 0, assigned: 'none', etag: 'W/"a"', details: { etag: 'W/"ad"', description: '', checklist: [] } },
-    { id: 'B2', title: 'Held', bucket: 'in_review', percent: 50, assigned: 'someone_else', etag: 'W/"b"', details: { etag: 'W/"bd"', description: '', checklist: [] } },
-    { id: 'C3', title: 'Done card', bucket: 'done', percent: 100, assigned: 'none', etag: 'W/"c"' },
+    { id: 'A1', title: 'Open', bucket: 'in_progress', percent: 0, assigned: 'none', createdBy: ME, etag: 'W/"a"', details: { etag: 'W/"ad"', description: '', checklist: [] } },
+    { id: 'B2', title: 'Held', bucket: 'in_review', percent: 50, assigned: 'someone_else', createdBy: ME, etag: 'W/"b"', details: { etag: 'W/"bd"', description: '', checklist: [] } },
+    { id: 'C3', title: 'Done card', bucket: 'done', percent: 100, assigned: 'none', createdBy: ME, etag: 'W/"c"' },
   ]
   const prs: Pr[] = [
     { repo: 'alpha', number: 133, title: 't', author: 'someone', state: 'OPEN', isDraft: false, mergedAt: null, updatedAt: '', branch: '' },
@@ -419,7 +420,7 @@ describe('proposal check', () => {
   test('drops what is already so: same percent, same bucket, a block that says it', () => {
     const block = '<!-- board -->\r\nSTATUS 2026-10-01: in review · PR alpha#133\r\n<!-- /board -->\r\n\r\nBody'
     const held: Card[] = [
-      { id: 'D4', title: 'Marked', bucket: 'in_review', percent: 50, assigned: 'none', etag: 'W/"d"', details: { etag: 'W/"dd"', description: block, checklist: [] } },
+      { id: 'D4', title: 'Marked', bucket: 'in_review', percent: 50, assigned: 'none', createdBy: ME, etag: 'W/"d"', details: { etag: 'W/"dd"', description: block, checklist: [] } },
     ]
     const checked = checkProposal(
       {
@@ -466,8 +467,8 @@ describe('proposal check', () => {
   test('assign only for a card in In Progress or moved there; no user id from a card title', () => {
     const more: Card[] = [
       ...cards,
-      { id: 'E5', title: 'Backlog card', bucket: 'backlog', percent: 0, assigned: 'none', etag: 'W/"e"', details: { etag: 'W/"ed"', description: '', checklist: [] } },
-      { id: 'F6', title: `Owner ${OTHER}`, bucket: 'backlog', percent: 0, assigned: 'none', etag: 'W/"f"', details: { etag: 'W/"fd"', description: '', checklist: [] } },
+      { id: 'E5', title: 'Backlog card', bucket: 'backlog', percent: 0, assigned: 'none', createdBy: ME, etag: 'W/"e"', details: { etag: 'W/"ed"', description: '', checklist: [] } },
+      { id: 'F6', title: `Owner ${OTHER}`, bucket: 'backlog', percent: 0, assigned: 'none', createdBy: ME, etag: 'W/"f"', details: { etag: 'W/"fd"', description: '', checklist: [] } },
     ]
     const checked = checkProposal(
       {
@@ -507,7 +508,7 @@ describe('proposal check', () => {
   test('statuses, repos and skipped cards follow the config', () => {
     const side: Card[] = [
       ...cards,
-      { id: 'G7', title: 'Side: Tidy Notes', bucket: 'backlog', percent: 0, assigned: 'none', etag: 'W/"g"', details: { etag: 'W/"gd"', description: '', checklist: [] } },
+      { id: 'G7', title: 'Side: Tidy Notes', bucket: 'backlog', percent: 0, assigned: 'none', createdBy: ME, etag: 'W/"g"', details: { etag: 'W/"gd"', description: '', checklist: [] } },
     ]
     const checked = checkProposal(
       {
@@ -531,7 +532,7 @@ describe('proposal check', () => {
 
 describe('new cards in the create-backlog format', () => {
   const cards: Card[] = [
-    { id: 'A1', title: 'Open', bucket: 'in_progress', percent: 0, assigned: 'none', etag: 'W/"a"', details: { etag: 'W/"ad"', description: '', checklist: [] } },
+    { id: 'A1', title: 'Open', bucket: 'in_progress', percent: 0, assigned: 'none', createdBy: ME, etag: 'W/"a"', details: { etag: 'W/"ad"', description: '', checklist: [] } },
   ]
   const check = (rows: unknown[], ctx: Context, on: Card[] = cards) => {
     const checked = checkProposal({ rows }, on, [], CFG, ctx)
@@ -634,7 +635,7 @@ describe('new cards in the create-backlog format', () => {
 
   test('source sets the entry of an old card without one', async () => {
     const ctx = await contextFor(BACKLOG)
-    const old: Card = { id: 'O1', title: 'Cache Pages', bucket: 'backlog', percent: 0, assigned: 'none', etag: 'W/"o"', details: { etag: 'W/"od"', description: 'old text', checklist: [] } }
+    const old: Card = { id: 'O1', title: 'Cache Pages', bucket: 'backlog', percent: 0, assigned: 'none', createdBy: ME, etag: 'W/"o"', details: { etag: 'W/"od"', description: 'old text', checklist: [] } }
     const marked: Card = { ...old, id: 'O2', details: { etag: 'W/"o2"', description: '<!-- board-src: alpha/backlog.md#0123456789ab -->\nold', checklist: [] } }
     const source = { file: 'alpha/backlog.md', heading: CACHE }
     const { rows, dropped } = check(
@@ -660,6 +661,7 @@ describe('rewriting old cards into the skill format', () => {
     bucket: 'backlog',
     percent: 0,
     assigned: 'none',
+    createdBy: ME,
     etag: `W/"${id}"`,
     details: { etag: `W/"${id}d"`, description, checklist: [{ title: 'Add a cache folder per input', isChecked: true }] },
     ...extra,
@@ -807,6 +809,42 @@ describe('rewriting old cards into the skill format', () => {
   })
 })
 
+describe('cards someone else made', () => {
+  test('are not assigned, rewritten or started; other rows on them go', () => {
+    const theirs: Card = {
+      id: 'C9',
+      title: 'Their Card',
+      bucket: 'in_progress',
+      percent: 0,
+      assigned: 'none',
+      createdBy: OTHER,
+      etag: 'W/"c9"',
+      details: { etag: 'W/"c9d"', description: 'free text', checklist: [] },
+    }
+    const backlog: Card = { ...theirs, id: 'C8', bucket: 'backlog', etag: 'W/"c8"' }
+    const unknown: Card = { ...theirs, id: 'C7', createdBy: undefined, etag: 'W/"c7"' }
+    const checked = checkProposal(
+      {
+        rows: [
+          { action: 'assign', taskId: 'C9' },
+          { action: 'rewrite', taskId: 'C9', ...(({ source: _s, action: _a, ...f }) => f)(create()) },
+          { action: 'move', taskId: 'C8', bucket: 'in_progress', progress: { standLine: 'Cache work runs' } },
+          { action: 'assign', taskId: 'C7' },
+          { action: 'percent', taskId: 'C9', percent: 50 },
+        ],
+      },
+      [theirs, backlog, unknown],
+      [],
+      CFG,
+      { ...NO_CONTEXT, standText: '- Cache work runs' },
+    )
+    if (typeof checked === 'string') throw new Error(checked)
+    expect(checked.rows.map(r => r.action)).toEqual(['percent'])
+    expect(checked.dropped).toHaveLength(4)
+    expect(checked.dropped.every(d => d.includes('jemand anderes angelegt'))).toBe(true)
+  })
+})
+
 describe('In Progress', () => {
   const card = (id: string, bucket: BucketKey): Card => ({
     id,
@@ -814,6 +852,7 @@ describe('In Progress', () => {
     bucket,
     percent: 0,
     assigned: 'none',
+    createdBy: ME,
     etag: `W/"${id}"`,
     details: { etag: `W/"${id}d"`, description: '', checklist: [] },
   })
@@ -859,6 +898,7 @@ describe('the Sprint Backlog', () => {
     bucket: 'backlog',
     percent: 0,
     assigned: 'none',
+    createdBy: ME,
     etag: `W/"${id}"`,
     details: { etag: `W/"${id}d"`, description: '', checklist: [] },
   })
@@ -867,7 +907,7 @@ describe('the Sprint Backlog', () => {
     backlogCard('S2'),
     backlogCard('S3'),
     backlogCard('S4'),
-    { id: 'P1', title: 'Running', bucket: 'in_progress', percent: 0, assigned: 'none', etag: 'W/"p"', details: { etag: 'W/"pd"', description: '', checklist: [] } },
+    { id: 'P1', title: 'Running', bucket: 'in_progress', percent: 0, assigned: 'none', createdBy: ME, etag: 'W/"p"', details: { etag: 'W/"pd"', description: '', checklist: [] } },
   ]
   const steps = nextStepsOf('# Stand\n\n## Nächster Schritt\n\n- Ship the **cache** work\n- Then tidy the docs.\n\n## Later\nnot this')
   const ctx: Context = { ...NO_CONTEXT, nextSteps: steps }

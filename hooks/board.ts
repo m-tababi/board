@@ -231,6 +231,8 @@ export type Card = {
   bucket: BucketKey | 'unknown'
   percent: number
   assigned: Assigned
+  // Who made the card (createdBy.user.id); absent when the task does not say.
+  createdBy?: string
   etag: string
   // Read for cards not in Done only.
   details?: { etag: string; description: string; checklist: { title: string; isChecked: boolean }[] }
@@ -247,6 +249,7 @@ function bucketOf(id: unknown, cfg: Config): BucketKey | 'unknown' {
 export function cardFrom(task: unknown, cfg: Config): Card | null {
   if (typeof task !== 'object' || task === null) return null
   const t = task as Record<string, unknown>
+  const creator = (t.createdBy as { user?: { id?: unknown } } | null | undefined)?.user?.id
   const id = t.id
   const etag = t['@odata.etag']
   if (typeof id !== 'string' || !ID_RE.test(id) || typeof etag !== 'string' || !ETAG_RE.test(etag)) return null
@@ -258,6 +261,7 @@ export function cardFrom(task: unknown, cfg: Config): Card | null {
     bucket: bucketOf(t.bucketId, cfg),
     percent: typeof t.percentComplete === 'number' ? t.percentComplete : 0,
     assigned,
+    ...(typeof creator === 'string' ? { createdBy: creator } : {}),
     etag,
   }
 }
@@ -432,7 +436,7 @@ The user story is exactly "${STORY_TEMPLATE}": it starts with the words "As a de
 ${JSON.stringify(EXAMPLE_CARD)}
 Before you answer, check every create and rewrite against this template field by field: title (plain English, no date, no backticks or markdown), priority, the exact story form, 1 or more tasks, 3 to 5 acceptance criteria. A row that does not fit is dropped unseen; fix it or leave it out.
 source: an open card that already covers a backlog entry but has no <!-- board-src: … --> line at the top of its description -> propose source with that entry, instead of a create.
-rewrite: an open card whose isSkillFormat is false is brought into the create-backlog format: give title, priority, userStory, tasks and acceptanceCriteria for it, taken only from the card's own title, description and checklist (and the backlog entry its board-src line names); keep its meaning, invent no work. Keep a task's wording when it is still a task of the card, so its tick carries over. Never for a card assigned to someone else or tied to a PR whose author is not ${cfg.ownerLogin}. At most ${MAX_REWRITES}. Check every rewrite against the template exactly like a create. The card's title and priority are replaced, its description gets the template body on top; everything the old description held stays below it word for word under "Previous notes:", ticked checklist items stay, its <!-- board-src --> line and <!-- board --> block stay. No rewrite for a card with isDescriptionCut, and ticked items no task repeats count against the checklist's 20.
+rewrite: an open card whose isSkillFormat is false is brought into the create-backlog format: give title, priority, userStory, tasks and acceptanceCriteria for it, taken only from the card's own title, description and checklist (and the backlog entry its board-src line names); keep its meaning, invent no work. Keep a task's wording when it is still a task of the card, so its tick carries over. Never for a card assigned to someone else, with isOwnCard false, or tied to a PR whose author is not ${cfg.ownerLogin}. At most ${MAX_REWRITES}. Check every rewrite against the template exactly like a create. The card's title and priority are replaced, its description gets the template body on top; everything the old description held stays below it word for word under "Previous notes:", ticked checklist items stay, its <!-- board-src --> line and <!-- board --> block stay. No rewrite for a card with isDescriptionCut, and ticked items no task repeats count against the checklist's 20.
 
 <create-backlog-skill>
 ${skill}
@@ -454,7 +458,7 @@ For every open card (bucket other than done) decide whether the board matches re
 
 In Progress: move a card from backlog or sprint_backlog to in_progress only when its work is running, and give the proof as progress: either {"pr":N,"repo":R}, an open PR by ${cfg.ownerLogin} for this work from the PR list, or {"standLine":L}, one whole line of the stand file copied exactly that says the work is running. Propose assign for the card in the same answer. Without such proof leave the card where it is.
 
-Assignment rule: a card in in_progress with assigned = "none" -> propose assign (it gets the board's owner). Cards for the owner's running work -> assign. Never propose assign for a card with assigned "someone_else" or for a card tied to a PR whose author is not ${cfg.ownerLogin}. Backlog and sprint_backlog cards without assignment stay free.
+Assignment rule: a card in in_progress with assigned = "none" -> propose assign (it gets the board's owner). Cards for the owner's running work -> assign. Never propose assign (or a move to in_progress) for a card with isOwnCard false, with assigned "someone_else" or for a card tied to a PR whose author is not ${cfg.ownerLogin}. Backlog and sprint_backlog cards without assignment stay free.
 
 ${sprint}
 
@@ -488,6 +492,7 @@ export function promptFor(s: Sources, cfg: Config, nextSteps: string | null = nu
       bucket: c.bucket,
       percent: c.percent,
       assigned: c.assigned,
+      isOwnCard: c.createdBy === cfg.ownerId,
       checklist: c.details?.checklist ?? [],
       description: cutDescription(c.details?.description ?? ''),
       ...((c.details?.description ?? '').length > DESCRIPTION_CAP ? { isDescriptionCut: true } : {}),
@@ -886,6 +891,10 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
         why = clean(`Nächster Schritt: „${clean(r.nextStep, 100)}“ – ${evidence}`, 300)
       }
       if (r.bucket === 'in_progress' && (card.bucket === 'backlog' || card.bucket === 'sprint_backlog')) {
+        if (card.createdBy !== cfg.ownerId) {
+          drop(at, r, `Karte hat jemand anderes angelegt`)
+          continue
+        }
         // Started only for running work: an open PR of the owner's, or a line of the stand file that says so.
         const proof = progressOf(r.progress, prs, cfg, ctx)
         if (proof === null) {
@@ -896,6 +905,10 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
       }
       row = { ...base, evidence: why, action, bucket: r.bucket as BucketKey }
     } else if (action === 'assign') {
+      if (card.createdBy !== cfg.ownerId) {
+        drop(at, r, `Karte hat jemand anderes angelegt`)
+        continue
+      }
       if (card.assigned !== 'none') {
         drop(at, r, `Karte ist schon zugewiesen`)
         continue
@@ -906,6 +919,10 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
       // Only the owner's or a free card, not tied to someone else's PR, not yet in the format.
       if (!ctx.hasSkill) {
         drop(at, r, `neu fassen gesperrt (Skill-Datei create-backlog nicht lesbar)`)
+        continue
+      }
+      if (card.createdBy !== cfg.ownerId) {
+        drop(at, r, `Karte hat jemand anderes angelegt`)
         continue
       }
       if (card.assigned === 'someone_else') {

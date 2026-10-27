@@ -634,8 +634,14 @@ def _update(graph, group, today, note, outcome, cfg):
                 held.add(r["n"])
         elif live is not None:
             before = set(live.get("assignments") or {})
+            # Only the owner's own cards are assigned or rewritten.
+            creator = ((live.get("createdBy") or {}).get("user") or {}).get("id")
             for r in task_rows:
-                if r["action"] == "rewrite":
+                if r["action"] in ("assign", "rewrite") and creator != cfg.owner:
+                    note(r, "skipped", "Karte hat jemand anderes angelegt")
+                    held.add(r["n"])
+            for r in task_rows:
+                if r["action"] == "rewrite" and r["n"] not in held:
                     _prepare_rewrite(graph, task_id, r, note, held, prepared)
             body, sent = {}, []
             for r in task_rows:
@@ -652,6 +658,8 @@ def _update(graph, group, today, note, outcome, cfg):
                         continue
                     body["title"] = r["newTitle"]
                     body["priority"] = PRIORITIES[r["priority"]]
+                elif r["n"] in held:
+                    continue
                 elif before:
                     note(r, "skipped", "Karte ist schon zugewiesen")
                     continue

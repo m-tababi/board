@@ -146,6 +146,7 @@ class FakeGraph:
             "bucketId": t["bucketId"],
             "percentComplete": t["percentComplete"],
             "assignments": t["assignments"],
+            "createdBy": {"user": {"id": t.get("createdBy", ME)}},
             "@odata.etag": t["etag"],
         }
 
@@ -760,6 +761,19 @@ class Rewrites(Base):
         out = self.run_apply(g, [rewrite()], [1])
         self.assertEqual(self.results(out), {1: "skipped"})
         self.assertEqual(g.writes, [])
+
+    def test_a_card_someone_else_made_is_neither_rewritten_nor_assigned(self):
+        made = self.old_card()
+        made["createdBy"] = OTHER
+        g = FakeGraph([made])
+        out = self.run_apply(g, [rewrite(), row(2, "assign")], [1, 2])
+        self.assertEqual(self.results(out), {1: "skipped", 2: "skipped"})
+        self.assertIn("angelegt", out["rows"][0]["detail"])
+        self.assertEqual(g.writes, [])
+        # A move on such a card still goes.
+        g = FakeGraph([made])
+        out = self.run_apply(g, [row(1, "move", bucket="done")], [1])
+        self.assertEqual(self.results(out), {1: "ok"})
 
     def test_a_changed_card_is_skipped_whole(self):
         changed = self.old_card()
