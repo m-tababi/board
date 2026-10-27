@@ -657,7 +657,7 @@ describe('the Sprint Backlog', () => {
     backlogCard('S4'),
     { id: 'P1', title: 'Running', bucket: 'in_progress', percent: 0, assigned: 'none', etag: 'W/"p"', details: { etag: 'W/"pd"', description: '', checklist: [] } },
   ]
-  const steps = nextStepsOf('# Stand\n\n## Nächster Schritt\n\nShip the **cache** work, then tidy the docs.\n\n## Later\nnot this')
+  const steps = nextStepsOf('# Stand\n\n## Nächster Schritt\n\n- Ship the **cache** work\n- Then tidy the docs.\n\n## Later\nnot this')
   const ctx: Context = { ...NO_CONTEXT, nextSteps: steps }
   const pull = (taskId: string, nextStep = 'ship the cache work') => ({ action: 'move', taskId, bucket: 'sprint_backlog', nextStep, evidence: 'Stand' })
   const check = (rows: unknown[], on: Context = ctx) => {
@@ -667,7 +667,7 @@ describe('the Sprint Backlog', () => {
   }
 
   test('the section stops at the next heading of its level', () => {
-    expect(steps).toBe('Ship the **cache** work, then tidy the docs.')
+    expect(steps).toBe('- Ship the **cache** work\n- Then tidy the docs.')
     expect(nextStepsOf('# Stand\nnothing')).toBeNull()
   })
 
@@ -679,13 +679,17 @@ describe('the Sprint Backlog', () => {
 
   test('another bucket, a fourth pull, an assignment, a step not in the section, no standFile: dropped', () => {
     expect(check([pull('P1')]).dropped[0]).toContain('nur aus Backlog')
-    const four = check([pull('S1'), pull('S2'), pull('S3', 'tidy the docs'), pull('S4', 'tidy the docs')])
+    const four = check([pull('S1'), pull('S2'), pull('S3', 'Then tidy the docs.'), pull('S4', '- then tidy the docs.')])
     expect(four.rows).toHaveLength(3)
     expect(four.dropped).toEqual(['Vorschlag 4: mehr als 3 Karten in den Sprint Backlog'])
     const assigned = check([pull('S1'), { action: 'assign', taskId: 'S1' }])
     expect(assigned.rows.map(r => r.action)).toEqual(['move'])
     expect(assigned.dropped[0]).toContain('bleiben frei')
     expect(check([pull('S1', 'release the parser')]).dropped[0]).toContain('nextStep')
+    // Only a whole line or bullet counts, never a piece of one.
+    for (const piece of ['the docs', 'tidy the docs', 'Ship the', 'cache']) {
+      expect([piece, check([pull('S1', piece)]).dropped[0]]).toEqual([piece, expect.stringContaining('nextStep')])
+    }
     expect(check([pull('S1')], NO_CONTEXT).dropped[0]).toContain('standFile')
   })
 })

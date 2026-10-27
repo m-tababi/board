@@ -366,13 +366,20 @@ export function nextStepsOf(text: string): string | null {
   return body === '' ? null : body
 }
 
-function plain(text: string): string {
-  return text.replace(/[`*_]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
+// A line as compared with a step: no list marker, no bold or italic marks, spacing and case aside.
+function plainLine(text: string): string {
+  return text
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+/, '')
+    .replace(/\*\*|__|[*_]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase()
 }
 
-/** Whether `step` is text of the next-step section (case, markup and spacing aside). */
+/** Whether `step` is one whole line or bullet of the next-step section, not a piece of one. */
 export function isNamedStep(step: unknown, section: string): boolean {
-  return typeof step === 'string' && plain(step).length >= 5 && plain(section).includes(plain(step))
+  if (typeof step !== 'string' || plainLine(step) === '') return false
+  return section.split('\n').some(line => plainLine(line) === plainLine(step))
 }
 
 /** A title as compared with old cards: no date prefix, backticks or punctuation, lower case. */
@@ -408,7 +415,7 @@ source: an open card that already covers a backlog entry but has no <!-- board-s
 ${skill}
 </create-backlog-skill>`
   const sprint = hasNextSteps
-    ? `Sprint Backlog: move a card from backlog to sprint_backlog only when its work is named in the "Next steps" section of the data; give nextStep: the words of that section that name it, copied exactly. At most ${MAX_SPRINT}. Never assign these cards.`
+    ? `Sprint Backlog: move a card from backlog to sprint_backlog only when its work is named in the "Next steps" section of the data; give nextStep: the one whole line or bullet of that section that names it, copied exactly (no part of a line). At most ${MAX_SPRINT}. Never assign these cards.`
     : 'Sprint Backlog: never move a card to sprint_backlog in this run.'
   return `You reconcile a Microsoft Planner board with the actual state of its code repositories and propose board changes for a human to confirm.
 
