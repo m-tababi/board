@@ -696,7 +696,9 @@ class Rewrites(Base):
             "<!-- board -->\nSTATUS 2026-10-01: open · PR alpha#133\n<!-- /board -->\n\n"
             "Priority: Important\n\n"
             f"{STORY}\n\n"
-            "Acceptance Criteria:\n- A rerun reads pages from the cache\n- A changed input invalidates its entry\n- The cache folder is documented",
+            "Acceptance Criteria:\n- A rerun reads pages from the cache\n- A changed input invalidates its entry\n- The cache folder is documented"
+            # Nothing of the old description is lost: it stays word for word below.
+            "\n\nPrevious notes:\nOld free text\nwith lines",
         )
         self.assertEqual(
             details_body["checklist"],
@@ -704,11 +706,11 @@ class Rewrites(Base):
                 "item-01": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": "Add a cache folder per input", "isChecked": True, "orderHint": " a!"},
                 "item-02": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": "Key entries by the input hash", "isChecked": False, "orderHint": " b!"},
                 "a1": None,
-                "b2": None,
             },
         )
-        # On the board: the old items are gone, the tick carried over by text.
-        self.assertEqual(sorted(g.tasks[T1]["checklist"]), ["item-01", "item-02"])
+        # On the board: the ticked item no task repeats stays, the repeated one carries its tick over.
+        self.assertEqual(sorted(g.tasks[T1]["checklist"]), ["b2", "item-01", "item-02"])
+        self.assertTrue(g.tasks[T1]["checklist"]["b2"]["isChecked"])
         self.assertEqual(g.tasks[T1]["title"], "Cache the Parsed Pages")
         # Each PATCH went with the etag read before it.
         patches = [c for c in g.calls if "patch" in c]
@@ -716,13 +718,42 @@ class Rewrites(Base):
         self.assertIn(f'If-Match=W/"d-{T1}"', patches[1])
 
     def test_a_card_without_line_or_block_gets_the_plain_body_and_more_than_twenty_tasks_overflow(self):
-        g = FakeGraph([task(T1, description="Just text")])
+        g = FakeGraph([task(T1, description="Just text\n\n  with `code`")])
         tasks = [f"Task number {i}" for i in range(1, 23)]
         self.run_apply(g, [rewrite(tasks=tasks)], [1])
         body = g.writes[1][2]
         self.assertTrue(body["description"].startswith("Priority: Important\n\n"))
-        self.assertTrue(body["description"].endswith("\n\nRemaining tasks:\n- Task number 21\n- Task number 22"))
+        self.assertTrue(body["description"].endswith("\n\nRemaining tasks:\n- Task number 21\n- Task number 22\n\nPrevious notes:\nJust text\n\n  with `code`"))
         self.assertEqual(len(body["checklist"]), 20)
+
+    def test_nothing_left_below_line_and_block_gets_no_notes(self):
+        g = FakeGraph([task(T1, description="<!-- board -->\nSTATUS 2026-10-01: open\n<!-- /board -->\n\n")])
+        self.run_apply(g, [rewrite()], [1])
+        self.assertNotIn("Previous notes:", g.writes[1][2]["description"])
+
+    def test_unticked_old_items_go_ticked_ones_stay_on_their_own_keys(self):
+        old = task(T1, description="")
+        old["checklist"] = {
+            "item-01": {"title": "Ticked and kept", "isChecked": True, "orderHint": " !"},
+            "item-02": {"title": "Open and dropped", "isChecked": False, "orderHint": " !!"},
+        }
+        g = FakeGraph([old])
+        self.run_apply(g, [rewrite()], [1])
+        cl = g.writes[1][2]["checklist"]
+        # The ticked item-01 is not touched; the new tasks take the next free keys, over the unticked item-02.
+        self.assertNotIn("item-01", cl)
+        self.assertEqual([cl["item-02"]["title"], cl["item-03"]["title"]], ["Add a cache folder per input", "Key entries by the input hash"])
+        self.assertEqual(sorted(g.tasks[T1]["checklist"]), ["item-01", "item-02", "item-03"])
+        self.assertEqual(g.tasks[T1]["checklist"]["item-01"]["title"], "Ticked and kept")
+
+    def test_ticked_items_and_tasks_past_twenty_skip_the_row_before_any_write(self):
+        old = task(T1, description="")
+        old["checklist"] = {"k1": {"title": "Ticked, no task repeats it", "isChecked": True, "orderHint": " !"}}
+        g = FakeGraph([old])
+        out = self.run_apply(g, [rewrite(tasks=[f"Task number {i}" for i in range(1, 21)])], [1])
+        self.assertEqual(self.results(out), {1: "skipped"})
+        self.assertIn("über 20", out["rows"][0]["detail"])
+        self.assertEqual(g.writes, [])
 
     def test_a_card_someone_else_holds_is_left_alone(self):
         g = FakeGraph([self.old_card(assignments=[OTHER])])

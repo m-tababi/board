@@ -432,7 +432,7 @@ The user story is exactly "${STORY_TEMPLATE}": it starts with the words "As a de
 ${JSON.stringify(EXAMPLE_CARD)}
 Before you answer, check every create and rewrite against this template field by field: title (plain English, no date, no backticks or markdown), priority, the exact story form, 1 or more tasks, 3 to 5 acceptance criteria. A row that does not fit is dropped unseen; fix it or leave it out.
 source: an open card that already covers a backlog entry but has no <!-- board-src: … --> line at the top of its description -> propose source with that entry, instead of a create.
-rewrite: an open card whose isSkillFormat is false is brought into the create-backlog format: give title, priority, userStory, tasks and acceptanceCriteria for it, taken only from the card's own title, description and checklist (and the backlog entry its board-src line names); keep its meaning, invent no work. Keep a task's wording when it is still a task of the card, so its tick carries over. Never for a card assigned to someone else or tied to a PR whose author is not ${cfg.ownerLogin}. At most ${MAX_REWRITES}. Check every rewrite against the template exactly like a create; title, description and checklist of the card are replaced, its <!-- board-src --> line and <!-- board --> block stay.
+rewrite: an open card whose isSkillFormat is false is brought into the create-backlog format: give title, priority, userStory, tasks and acceptanceCriteria for it, taken only from the card's own title, description and checklist (and the backlog entry its board-src line names); keep its meaning, invent no work. Keep a task's wording when it is still a task of the card, so its tick carries over. Never for a card assigned to someone else or tied to a PR whose author is not ${cfg.ownerLogin}. At most ${MAX_REWRITES}. Check every rewrite against the template exactly like a create. The card's title and priority are replaced, its description gets the template body on top; everything the old description held stays below it word for word under "Previous notes:", ticked checklist items stay, its <!-- board-src --> line and <!-- board --> block stay. No rewrite for a card with isDescriptionCut, and ticked items no task repeats count against the checklist's 20.
 
 <create-backlog-skill>
 ${skill}
@@ -474,6 +474,10 @@ E (evidence) is German, at most 200 characters, and names the source: file:line,
 At most ${MAX_ROWS} rows; order them by importance. Answer with JSON only, no prose and no code fence: {"rows":[...]}. An empty list is a valid answer.${own}`
 }
 
+function cutDescription(text: string): string {
+  return text.length > DESCRIPTION_CAP ? `${text.slice(0, DESCRIPTION_CAP)}\n… (gekürzt)` : text
+}
+
 /** The user message: every source inside one <data> block. */
 export function promptFor(s: Sources, cfg: Config, nextSteps: string | null = null): string {
   const open = s.cards
@@ -485,7 +489,8 @@ export function promptFor(s: Sources, cfg: Config, nextSteps: string | null = nu
       percent: c.percent,
       assigned: c.assigned,
       checklist: c.details?.checklist ?? [],
-      description: (c.details?.description ?? '').slice(0, 3000),
+      description: cutDescription(c.details?.description ?? ''),
+      ...((c.details?.description ?? '').length > DESCRIPTION_CAP ? { isDescriptionCut: true } : {}),
       isSkillFormat: isSkillFormat(c),
     }))
   const done = s.cards.filter(c => c.bucket === 'done').map(c => c.title)
@@ -628,7 +633,20 @@ function sourceFrom(raw: unknown, ctx: Context): (Source & { key: string; entry:
 
 /** The create-backlog fields of a new card, or why they do not hold (apply.py checks the same). */
 // The body post-backlog writes below the board-src line and the board block.
-const SKILL_BODY_RE = /^Priority: (Urgent|Important|Medium|Low)\r?\n\r?\nAs a developer, I want to .{5,} so that .{5,}\.\r?\n\r?\nAcceptance Criteria:(\r?\n- [^\r\n]{3,}){3,5}(\r?\n\r?\nRemaining tasks:(\r?\n- [^\r\n]+)+)?\s*$/
+const SKILL_BODY_RE =
+  /^Priority: (Urgent|Important|Medium|Low)\r?\n\r?\nAs a developer, I want to .{5,} so that .{5,}\.\r?\n\r?\nAcceptance Criteria:(\r?\n- [^\r\n]{3,}){3,5}(\r?\n\r?\nRemaining tasks:(\r?\n- [^\r\n]+)+)?(\r?\n\r?\nPrevious notes:\r?\n[\s\S]*)?\s*$/
+// The line above the old description a rewrite keeps, as apply.py writes it.
+export const PREVIOUS_NOTES = 'Previous notes:'
+// The model reads a description up to this length; a longer one is cut, marked, and never rewritten.
+export const DESCRIPTION_CAP = 20_000
+
+/** What a description holds below its board-src line and board block: what a rewrite keeps as notes. */
+export function remainderOf(description: string): string {
+  const head = SOURCE_LINE_RE.exec(description)?.[0] ?? ''
+  const rest = description.slice(head.length)
+  const block = /^<!-- board -->\r?\n[\s\S]*?\r?\n<!-- \/board -->(?:\r?\n){0,2}/.exec(rest)?.[0] ?? ''
+  return rest.slice(block.length)
+}
 
 /** Whether a card already reads as the create-backlog skill writes it: its title and its description. */
 export function isSkillFormat(card: Card): boolean {
@@ -902,9 +920,20 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
         drop(at, r, `Karte ist schon im Skill-Format`)
         continue
       }
+      if (card.details.description.length > DESCRIPTION_CAP) {
+        drop(at, r, `Beschreibung länger als ${DESCRIPTION_CAP} Zeichen, Opus las sie nicht ganz`)
+        continue
+      }
       const wrong = cardFieldsError(r)
       if (wrong !== null) {
         drop(at, r, `${wrong}`)
+        continue
+      }
+      // Ticked old items no task repeats stay; with the tasks they must fit the checklist's twenty.
+      const newTasks = new Set((r.tasks as string[]).map(t => t.trim().toLowerCase()))
+      const kept = card.details.checklist.filter(i => i.isChecked && !newTasks.has(i.title.trim().toLowerCase())).length
+      if (kept > 0 && Math.min((r.tasks as string[]).length, 20) + kept > 20) {
+        drop(at, r, `${kept} abgehakte alte Einträge bleiben, mit den Tasks über 20 in der Checkliste`)
         continue
       }
       const newTitle = r.title as string
@@ -1101,28 +1130,38 @@ function cardLines(row: Extract<Row, { action: 'create' }>, entry: Entry | undef
   ]
 }
 
-/** Old against new for a rewrite: title, description and checklist as they stand, then as they will. */
+// A pane line is cut only past this length, and says so.
+const PANE_LINE = 500
+
+function paneLine(text: string): string {
+  const flat = clean(text, 100_000)
+  return flat.length > PANE_LINE ? `${flat.slice(0, PANE_LINE)} … (gekürzt)` : flat
+}
+
+/** Old against new for a rewrite: title, the whole description and checklist as they stand, then as they will. */
 function rewriteLines(row: Extract<Row, { action: 'rewrite' }>, card: Card | undefined): string[] {
   const old = card?.details
-  const checked = new Set((old?.checklist ?? []).filter(i => i.isChecked).map(i => i.title.trim().toLowerCase()))
+  const items = old?.checklist ?? []
+  const checked = new Set(items.filter(i => i.isChecked).map(i => i.title.trim().toLowerCase()))
+  const tasks = new Set(row.tasks.map(t => t.trim().toLowerCase()))
+  const kept = items.filter(i => i.isChecked && !tasks.has(i.title.trim().toLowerCase()))
+  const notes = remainderOf(old?.description ?? '')
   return [
     'Alt:',
-    `  ${clean(card?.title ?? row.title, 120)}`,
-    ...(old?.description ?? '')
-      .split('\n')
-      .filter(l => l.trim() !== '')
-      .slice(0, 12)
-      .map(l => `  ${clean(l, 160)}`),
-    ...(old?.checklist ?? []).map(i => `  ${i.isChecked ? '[x]' : '[ ]'} ${clean(i.title, 100)}`),
+    `  ${paneLine(card?.title ?? row.title)}`,
+    ...(old?.description ?? '').split('\n').map(l => `  ${paneLine(l)}`),
+    ...items.map(i => `  ${i.isChecked ? '[x]' : '[ ]'} ${paneLine(i.title)}`),
     'Neu:',
     `  ${clean(row.newTitle, 70)}`,
     `  Priority: ${row.priority}`,
-    `  ${clean(row.userStory, 300)}`,
+    `  ${clean(row.userStory, 600)}`,
     '  Acceptance Criteria:',
     ...row.acceptanceCriteria.map(c => `  - ${clean(c, 200)}`),
+    ...(row.tasks.length > 20 ? ['  Remaining tasks:', ...row.tasks.slice(20).map(t => `  - ${clean(t, 100)}`)] : []),
+    ...(notes.trim() === '' ? [] : [`  ${PREVIOUS_NOTES}`, ...notes.split('\n').map(l => `  ${paneLine(l)}`)]),
     '  Checkliste:',
     ...row.tasks.slice(0, 20).map(t => `  ${checked.has(t.trim().toLowerCase()) ? '[x]' : '[ ]'} ${clean(t, 100)}`),
-    ...(row.tasks.length > 20 ? ['  Remaining tasks (in der Beschreibung):', ...row.tasks.slice(20).map(t => `  - ${clean(t, 100)}`)] : []),
+    ...kept.map(i => `  [x] ${paneLine(i.title)} (bleibt, abgehakt)`),
     '  (board-src-Zeile und Markerblock bleiben oben stehen)',
   ]
 }
@@ -1173,7 +1212,8 @@ export function paneRows(rows: Row[], cards: Card[], entries: Entry[] = []): Pan
       before,
       after: clean(after, 200),
       detail,
-      isChecked: true,
+      // A rewrite replaces what people wrote: it is taken over only on purpose.
+      isChecked: row.action !== 'rewrite',
       isOpen: false,
     }
   })

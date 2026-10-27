@@ -55,6 +55,8 @@ MAX_CREATES = 15
 # Existing cards brought into the create-backlog format per run.
 MAX_REWRITES = 15
 MAX_CHECKLIST = 20
+# Above it, a rewrite keeps what the old description held.
+PREVIOUS_NOTES = "Previous notes:"
 SOURCE_FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}/[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$")
 AZ_TIMEOUT_S = 30
 # No card starts after 120 s; the slowest card (five az calls of 30 s: task GET,
@@ -259,10 +261,14 @@ def card_body(row):
     return "\n".join(lines)
 
 
-def checklist_of(tasks, checked=frozenset()):
-    """The first twenty tasks as Planner checklist items; a task whose text is in `checked` stays ticked."""
+def checklist_of(tasks, checked=frozenset(), taken=frozenset()):
+    """The first twenty tasks as Planner checklist items; a task whose text is in `checked` stays ticked.
+
+    Keys in `taken` (old items that stay) are skipped.
+    """
+    keys = (f"item-{i:02d}" for i in range(1, 100) if f"item-{i:02d}" not in taken)
     return {
-        f"item-{i + 1:02d}": {
+        next(keys): {
             "@odata.type": "#microsoft.graph.plannerChecklistItem",
             "title": t,
             "isChecked": t.strip().casefold() in checked,
@@ -280,10 +286,12 @@ def card_details(row):
 def rewritten_details(details, row):
     """An existing card's details in the create-backlog format.
 
-    The board-src line and the board block at the top stay as they are; the rest
-    of the description gives way to the post-backlog body. The checklist is
-    replaced by the tasks (old items not reused are removed); an item whose text
-    a task repeats keeps its tick.
+    The board-src line and the board block at the top stay as they are; the
+    post-backlog body follows, and everything else the old description held
+    stays word for word below it under "Previous notes:". The checklist becomes
+    the tasks: an item whose text a task repeats keeps its tick, a ticked item
+    no task repeats stays as it is, an unticked one goes. Skip when the ticked
+    items kept and the tasks together pass twenty.
     """
     old = details.get("description") or ""
     head = SOURCE_LINE_RE.match(old)
@@ -295,12 +303,20 @@ def rewritten_details(details, row):
     block = BLOCK_RE.match(rest)
     if block:
         parts.append(block.group(0).rstrip("\r\n"))
-    parts.append(card_body(row))
-    items = details.get("checklist") or {}
-    checked = {str(v.get("title", "")).strip().casefold() for v in items.values() if isinstance(v, dict) and v.get("isChecked") is True}
-    checklist = checklist_of(row["tasks"], checked)
+        rest = rest[block.end() :]
+    body = card_body(row)
+    if rest.strip():
+        body += f"\n\n{PREVIOUS_NOTES}\n{rest}"
+    parts.append(body)
+    items = {k: v for k, v in (details.get("checklist") or {}).items() if isinstance(v, dict)}
+    checked = {str(v.get("title", "")).strip().casefold() for v in items.values() if v.get("isChecked") is True}
+    tasks = {t.strip().casefold() for t in row["tasks"]}
+    kept = {k for k, v in items.items() if v.get("isChecked") is True and str(v.get("title", "")).strip().casefold() not in tasks}
+    if kept and min(len(row["tasks"]), MAX_CHECKLIST) + len(kept) > MAX_CHECKLIST:
+        raise Skip(f"{len(kept)} abgehakte alte Einträge bleiben, mit den Tasks über {MAX_CHECKLIST} in der Checkliste")
+    checklist = checklist_of(row["tasks"], checked, kept)
     for key in items:
-        if key not in checklist:
+        if key not in checklist and key not in kept:
             checklist[key] = None
     return {"description": "\n\n".join(parts), "checklist": checklist}
 
@@ -601,6 +617,8 @@ def _update(graph, group, today, note, outcome, cfg):
     marker_rows = [r for r in group if r["action"] in ("marker", "source", "rewrite")]
     # Rewrites whose task half did not go through: their details stay as they are.
     held = set()
+    # The rewritten details, made from a fresh read before anything is written.
+    prepared = {}
 
     if task_rows:
         try:
@@ -616,6 +634,9 @@ def _update(graph, group, today, note, outcome, cfg):
                 held.add(r["n"])
         elif live is not None:
             before = set(live.get("assignments") or {})
+            for r in task_rows:
+                if r["action"] == "rewrite":
+                    _prepare_rewrite(graph, task_id, r, note, held, prepared)
             body, sent = {}, []
             for r in task_rows:
                 if r["action"] == "percent":
@@ -623,6 +644,8 @@ def _update(graph, group, today, note, outcome, cfg):
                 elif r["action"] == "move":
                     body["bucketId"] = cfg.buckets[r["bucket"]]
                 elif r["action"] == "rewrite":
+                    if r["n"] in held:
+                        continue
                     if before - {cfg.owner}:
                         note(r, "skipped", "Karte ist jemand anderem zugewiesen")
                         held.add(r["n"])
@@ -649,17 +672,17 @@ def _update(graph, group, today, note, outcome, cfg):
     for r in marker_rows:
         if r["n"] in held:
             continue
+        if r["action"] == "rewrite":
+            result, detail = graph.write("patch", f"/planner/tasks/{task_id}/details", prepared[r["n"]], r["detailsEtag"])
+            note(r, "ok" if result == "ok" else "error", "" if result == "ok" else f"Titel und Priorität neu, Beschreibung und Checkliste nicht: {detail}")
+            continue
         try:
             details = graph.get(f"/planner/tasks/{task_id}/details")
         except (RuntimeError, ValueError) as err:
             note(r, "error", str(err))
             continue
         if details.get("@odata.etag") != r["detailsEtag"]:
-            note(r, "skipped", "Beschreibung seit dem Abgleich geändert" + ("; Titel und Priorität schon neu" if r["action"] == "rewrite" else ""))
-            continue
-        if r["action"] == "rewrite":
-            result, detail = graph.write("patch", f"/planner/tasks/{task_id}/details", rewritten_details(details, r), r["detailsEtag"])
-            note(r, "ok" if result == "ok" else "error", "" if result == "ok" else f"Titel und Priorität neu, Beschreibung und Checkliste nicht: {detail}")
+            note(r, "skipped", "Beschreibung seit dem Abgleich geändert")
             continue
         try:
             old = details.get("description") or ""
@@ -673,6 +696,25 @@ def _update(graph, group, today, note, outcome, cfg):
         result, detail = graph.write("patch", f"/planner/tasks/{task_id}/details", {"description": new}, r["detailsEtag"])
         note(r, {"ok": "ok", "conflict": "skipped", "error": "error"}[result], "" if result == "ok" else detail)
         outcome["written"] = outcome["written"] or result == "ok"
+
+
+def _prepare_rewrite(graph, task_id, row, note, held, prepared):
+    """Reads the details and builds the rewrite; on any doubt the row is skipped before a write."""
+    try:
+        details = graph.get(f"/planner/tasks/{task_id}/details")
+    except (RuntimeError, ValueError) as err:
+        note(row, "error", str(err))
+        held.add(row["n"])
+        return
+    if details.get("@odata.etag") != row["detailsEtag"]:
+        note(row, "skipped", "Beschreibung seit dem Abgleich geändert")
+        held.add(row["n"])
+        return
+    try:
+        prepared[row["n"]] = rewritten_details(details, row)
+    except Skip as err:
+        note(row, "skipped", str(err))
+        held.add(row["n"])
 
 
 def _check_assignments(graph, task_id, before, assigned, owner):

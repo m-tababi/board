@@ -746,30 +746,64 @@ describe('rewriting old cards into the skill format', () => {
     expect(check([fix('R0')], cards, { ...NO_CONTEXT, hasSkill: false }).dropped[0]).toContain('gesperrt')
   })
 
-  test('the pane shows old against new, ticks carried over by text', () => {
-    const card = oldCard('R1')
+  test('the pane shows the whole old card against the new one, which keeps the old text as notes; the row starts unticked', () => {
+    const long = 'x'.repeat(600)
+    const card = oldCard('R1', {
+      details: {
+        etag: 'W/"R1d"',
+        description: `Old free text\nmore\n${long}`,
+        checklist: [
+          { title: 'Add a cache folder per input', isChecked: true },
+          { title: 'Ticked, no task repeats it', isChecked: true },
+          { title: 'Open, dropped', isChecked: false },
+        ],
+      },
+    })
     const { rows } = check([fix('R1')], [card])
     const [shown] = paneRows(rows, [card])
+    expect(shown?.isChecked).toBe(false)
     expect(shown?.change).toBe('neu fassen (Important)')
     expect(shown?.before).toBe('old card R1')
     expect(shown?.after).toBe('Cache the Parsed Pages')
+    const cut = `  ${'x'.repeat(500)} … (gekürzt)`
     expect(shown?.detail).toEqual([
       'Alt:',
       '  old card R1',
       '  Old free text',
       '  more',
+      cut,
       '  [x] Add a cache folder per input',
+      '  [x] Ticked, no task repeats it',
+      '  [ ] Open, dropped',
       'Neu:',
       '  Cache the Parsed Pages',
       '  Priority: Important',
       `  ${STORY}`,
       '  Acceptance Criteria:',
       ...CRITERIA.map(c => `  - ${c}`),
+      '  Previous notes:',
+      '  Old free text',
+      '  more',
+      cut,
       '  Checkliste:',
       '  [x] Add a cache folder per input',
       '  [ ] Key entries by the input hash',
+      '  [x] Ticked, no task repeats it (bleibt, abgehakt)',
       '  (board-src-Zeile und Markerblock bleiben oben stehen)',
     ])
+  })
+
+  test('a card with notes kept is in the format; a too long description or too many kept ticks drop the rewrite', () => {
+    const FORMAT = `Priority: Medium\n\n${STORY}\n\nAcceptance Criteria:\n- ${CRITERIA.join('\n- ')}`
+    expect(isSkillFormat(oldCard('N1', { title: 'Cache the Parsed Pages' }, `${FORMAT}\n\nPrevious notes:\nOld free text\n\nmore`))).toBe(true)
+    const huge = oldCard('L1', {}, 'y'.repeat(20_001))
+    expect(check([fix('L1')], [huge]).dropped[0]).toContain('länger als 20000 Zeichen')
+    const ticked = oldCard('T1', {
+      details: { etag: 'W/"T1d"', description: 'old', checklist: [{ title: 'Ticked, no task repeats it', isChecked: true }] },
+    })
+    const twenty = Array.from({ length: 20 }, (_, i) => `Task number ${i}`)
+    expect(check([fix('T1', { tasks: twenty })], [ticked]).dropped[0]).toContain('über 20')
+    expect(check([fix('T1', { tasks: twenty.slice(0, 19) })], [ticked]).rows).toHaveLength(1)
   })
 })
 
