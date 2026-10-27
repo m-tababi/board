@@ -732,6 +732,17 @@ class Rewrites(Base):
         self.run_apply(g, [rewrite()], [1])
         self.assertNotIn("Previous notes:", g.writes[1][2]["description"])
 
+    def test_ticks_carry_over_by_lower_case_as_in_the_pane(self):
+        # The pane compares with toLowerCase(); the script with lower(), not casefold(): ß stays ß.
+        old = task(T1, description="")
+        old["checklist"] = {"k1": {"title": "Straße prüfen", "isChecked": True, "orderHint": " !"}}
+        g = FakeGraph([old])
+        self.run_apply(g, [rewrite(tasks=["STRASSE prüfen", "ADD a cache folder per input"])], [1])
+        cl = g.writes[1][2]["checklist"]
+        self.assertEqual([v["isChecked"] for v in cl.values() if v is not None], [False, False])
+        # The old ticked item stays, as no task repeats it in lower case.
+        self.assertIn("k1", g.tasks[T1]["checklist"])
+
     def test_unticked_old_items_go_ticked_ones_stay_on_their_own_keys(self):
         old = task(T1, description="")
         old["checklist"] = {

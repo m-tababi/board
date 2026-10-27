@@ -271,7 +271,7 @@ def checklist_of(tasks, checked=frozenset(), taken=frozenset()):
         next(keys): {
             "@odata.type": "#microsoft.graph.plannerChecklistItem",
             "title": t,
-            "isChecked": t.strip().casefold() in checked,
+            "isChecked": t.strip().lower() in checked,
             "orderHint": f" {chr(97 + i)}!",
         }
         for i, t in enumerate(tasks[:MAX_CHECKLIST])
@@ -309,9 +309,9 @@ def rewritten_details(details, row):
         body += f"\n\n{PREVIOUS_NOTES}\n{rest}"
     parts.append(body)
     items = {k: v for k, v in (details.get("checklist") or {}).items() if isinstance(v, dict)}
-    checked = {str(v.get("title", "")).strip().casefold() for v in items.values() if v.get("isChecked") is True}
-    tasks = {t.strip().casefold() for t in row["tasks"]}
-    kept = {k for k, v in items.items() if v.get("isChecked") is True and str(v.get("title", "")).strip().casefold() not in tasks}
+    checked = {str(v.get("title", "")).strip().lower() for v in items.values() if v.get("isChecked") is True}
+    tasks = {t.strip().lower() for t in row["tasks"]}
+    kept = {k for k, v in items.items() if v.get("isChecked") is True and str(v.get("title", "")).strip().lower() not in tasks}
     if kept and min(len(row["tasks"]), MAX_CHECKLIST) + len(kept) > MAX_CHECKLIST:
         raise Skip(f"{len(kept)} abgehakte alte Einträge bleiben, mit den Tasks über {MAX_CHECKLIST} in der Checkliste")
     checklist = checklist_of(row["tasks"], checked, kept)
@@ -374,9 +374,9 @@ def validate(doc, cfg):
                 raise Refusal(f"Zeile {n}: create braucht {', '.join(sorted(allowed - {'n', 'action'}))}")
             _check_card(row)
             title = row["title"]
-            if title.casefold() in seen_titles:
+            if title.lower() in seen_titles:
                 raise Refusal(f"Zeile {n}: Karte doppelt angelegt")
-            seen_titles.add(title.casefold())
+            seen_titles.add(title.lower())
             if len(seen_titles) > MAX_CREATES:
                 raise Refusal(f"höchstens {MAX_CREATES} neue Karten je Lauf")
             continue
@@ -749,14 +749,14 @@ def _create(graph, row, today, state, note, outcome, cfg):
             path = f"/planner/plans/{cfg.plan_id}/tasks"
             while path:
                 page = graph.get(path)
-                titles |= {str(t.get("title", "")).strip().casefold() for t in page.get("value", [])}
+                titles |= {str(t.get("title", "")).strip().lower() for t in page.get("value", [])}
                 following = page.get("@odata.nextLink") or ""
                 path = following[len(GRAPH) :] if following.startswith(GRAPH + "/") else None
             state["titles"] = titles
     except (RuntimeError, ValueError) as err:
         note(row, "error", f"Kartenliste nicht lesbar: {err}")
         return
-    if title.casefold() in state["titles"]:
+    if title.lower() in state["titles"]:
         note(row, "skipped", "Karte mit diesem Titel gibt es schon")
         return
 
@@ -766,7 +766,7 @@ def _create(graph, row, today, state, note, outcome, cfg):
         note(row, "error", out)
         return
     outcome["written"] = True
-    state["titles"].add(title.casefold())
+    state["titles"].add(title.lower())
     try:
         created = json.loads(out)
     except ValueError:

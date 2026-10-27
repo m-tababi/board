@@ -795,6 +795,14 @@ describe('rewriting old cards into the skill format', () => {
     ])
   })
 
+  test('ticks carry over by lower case, as apply.py compares them', () => {
+    const card = oldCard('S1', { details: { etag: 'W/"S1d"', description: 'old', checklist: [{ title: 'Straße prüfen', isChecked: true }] } })
+    const { rows } = check([fix('S1', { tasks: ['STRASSE prüfen'] })], [card])
+    const detail = paneRows(rows, [card])[0]?.detail ?? []
+    expect(detail).toContain('  [ ] STRASSE prüfen')
+    expect(detail).toContain('  [x] Straße prüfen (bleibt, abgehakt)')
+  })
+
   test('a card with notes kept is in the format; a too long description or too many kept ticks drop the rewrite', () => {
     const FORMAT = `Priority: Medium\n\n${STORY}\n\nAcceptance Criteria:\n- ${CRITERIA.join('\n- ')}`
     expect(isSkillFormat(oldCard('N1', { title: 'Cache the Parsed Pages' }, `${FORMAT}\n\nPrevious notes:\nOld free text\n\nmore`))).toBe(true)
