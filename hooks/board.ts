@@ -456,7 +456,7 @@ For every open card (bucket other than done) decide whether the board matches re
 - A card in in_review whose PR is merged -> done; whose PR is open -> marker in_review with that PR.
 - Propose nothing that is already so: no percent equal to the card's percent, no move to its own bucket, no marker when the <!-- board --> block at the top of its description already states that status, PR and ref.
 
-In Progress: move a card from backlog or sprint_backlog to in_progress only when its work is running, and give the proof as progress: either {"pr":N,"repo":R}, an open PR by ${cfg.ownerLogin} for this work from the PR list, or {"standLine":L}, one whole line of the stand file copied exactly that says the work is running. Propose assign for the card in the same answer. Without such proof leave the card where it is.
+In Progress: move a card from backlog or sprint_backlog to in_progress only when its work is running, and give the proof as progress: either {"pr":N,"repo":R}, an open PR by ${cfg.ownerLogin} for this work from the PR list whose title or branch names the card (its board-src hash or three of its title's words), or {"standLine":L}, one whole list item under the stand file's "Offen" or "Nächster Schritt" heading, copied exactly, that says the work is running. Propose assign for the card in the same answer. Without such proof leave the card where it is.
 
 Assignment rule: a card in in_progress with assigned = "none" -> propose assign (it gets the board's owner). Cards for the owner's running work -> assign. Never propose assign (or a move to in_progress) for a card with isOwnCard false, with assigned "someone_else" or for a card tied to a PR whose author is not ${cfg.ownerLogin}. Backlog and sprint_backlog cards without assignment stay free.
 
@@ -673,15 +673,57 @@ function prOfCard(card: Card): Marker | undefined {
 }
 
 /** The proof that a card's work runs, as the pane names it; null when the data does not show it. */
-function progressOf(raw: unknown, prs: Pr[], cfg: Config, ctx: Context): string | null {
+// The stand file's sections whose list items may show running work.
+const RUNNING_SECTION_RE = /^(offen|nächster schritt)\b/i
+const LIST_ITEM_RE = /^\s*(?:[-*+]|\d+[.)])\s+\S/
+const RULE_RE = /^\s*([-*_])(\s*\1){2,}\s*$/
+// Words too common to tie a PR to a card.
+const STOP_WORDS = new Set(['with', 'from', 'into', 'that', 'this', 'when', 'than', 'then', 'them', 'their', 'only', 'each', 'over', 'under', 'also', 'more', 'less', 'make', 'have'])
+
+/** The list items under the stand file's "Offen" and "Nächster Schritt" headings, as compared with a step. */
+export function runningItemsOf(text: string): string[] {
+  const items: string[] = []
+  let level = 0
+  let isRunning = false
+  for (const line of text.split('\n')) {
+    const heading = /^(#{1,6})\s+(.*)$/.exec(line)
+    if (heading !== null) {
+      const depth = (heading[1] as string).length
+      if (depth <= level || !isRunning) {
+        isRunning = RUNNING_SECTION_RE.test((heading[2] as string).trim())
+        level = depth
+      }
+      continue
+    }
+    if (isRunning && LIST_ITEM_RE.test(line) && !RULE_RE.test(line)) items.push(plainLine(line))
+  }
+  return items
+}
+
+/** Words of a card title that can tie it to a PR: four letters or more, no stop words. */
+function titleWords(title: string): string[] {
+  return [...new Set(normalTitle(title).split(/[^a-z0-9äöüß]+/).filter(w => w.length >= 4 && !STOP_WORDS.has(w)))]
+}
+
+/** The proof that a card's work runs, as the pane names it; null when the data does not show it for this card. */
+function progressOf(raw: unknown, card: Card, prs: Pr[], cfg: Config, ctx: Context): string | null {
   if (typeof raw !== 'object' || raw === null) return null
   const p = raw as Record<string, unknown>
   const keys = Object.keys(p).sort().join()
   if (keys === 'pr,repo') {
     const pr = prs.find(x => x.repo === p.repo && x.number === p.pr)
-    return pr !== undefined && pr.state === 'OPEN' && pr.author === cfg.ownerLogin ? `PR ${pr.repo}#${pr.number}` : null
+    if (pr === undefined || pr.state !== 'OPEN' || pr.author !== cfg.ownerLogin) return null
+    // The PR must name the card: its source hash, or three of its title's words, in PR title or branch.
+    const named = `${pr.title} ${pr.branch}`.toLowerCase()
+    const prWords = new Set(named.split(/[^a-z0-9äöüß]+/))
+    const key = sourceOf(card.details?.description ?? '')?.split('#')[1]
+    const isNamed = (key !== undefined && named.includes(key)) || titleWords(card.title).filter(w => prWords.has(w)).length >= 3
+    return isNamed ? `PR ${pr.repo}#${pr.number} „${clean(pr.title, 80)}“` : null
   }
-  if (keys === 'standLine' && ctx.standText !== null && isNamedStep(p.standLine, ctx.standText)) return `„${clean(p.standLine, 100)}“`
+  if (keys === 'standLine' && ctx.standText !== null && typeof p.standLine === 'string') {
+    const step = plainLine(p.standLine)
+    if (step !== '' && runningItemsOf(ctx.standText).includes(step)) return `„${clean(p.standLine, 100)}“`
+  }
   return null
 }
 
@@ -896,7 +938,7 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
           continue
         }
         // Started only for running work: an open PR of the owner's, or a line of the stand file that says so.
-        const proof = progressOf(r.progress, prs, cfg, ctx)
+        const proof = progressOf(r.progress, card, prs, cfg, ctx)
         if (proof === null) {
           drop(at, r, `In Progress nur mit offenem PR von ${cfg.ownerLogin} oder einer Zeile der standFile als Beleg`)
           continue
@@ -1229,8 +1271,8 @@ export function paneRows(rows: Row[], cards: Card[], entries: Entry[] = []): Pan
       before,
       after: clean(after, 200),
       detail,
-      // A rewrite replaces what people wrote: it is taken over only on purpose.
-      isChecked: row.action !== 'rewrite',
+      // A rewrite replaces what people wrote, a start claims running work: both are taken over only on purpose.
+      isChecked: row.action !== 'rewrite' && !(row.action === 'move' && row.bucket === 'in_progress'),
       isOpen: false,
     }
   })

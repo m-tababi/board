@@ -492,7 +492,7 @@ describe('proposal check', () => {
       more,
       prs,
       CFG,
-      { ...NO_CONTEXT, standText: 'Backlog card runs' },
+      { ...NO_CONTEXT, standText: '## Offen\n- Backlog card runs' },
     )
     if (typeof moved === 'string') throw new Error(moved)
     expect(moved.rows.map(r => r.action)).toEqual(['move', 'assign'])
@@ -836,7 +836,7 @@ describe('cards someone else made', () => {
       [theirs, backlog, unknown],
       [],
       CFG,
-      { ...NO_CONTEXT, standText: '- Cache work runs' },
+      { ...NO_CONTEXT, standText: '## Offen\n- Cache work runs' },
     )
     if (typeof checked === 'string') throw new Error(checked)
     expect(checked.rows.map(r => r.action)).toEqual(['percent'])
@@ -848,7 +848,7 @@ describe('cards someone else made', () => {
 describe('In Progress', () => {
   const card = (id: string, bucket: BucketKey): Card => ({
     id,
-    title: `Card ${id}`,
+    title: `Cache the Parsed Pages ${id}`,
     bucket,
     percent: 0,
     assigned: 'none',
@@ -856,13 +856,19 @@ describe('In Progress', () => {
     etag: `W/"${id}"`,
     details: { etag: `W/"${id}d"`, description: '', checklist: [] },
   })
-  const cards = [card('B1', 'backlog'), card('B2', 'sprint_backlog'), card('B3', 'in_review')]
+  const keyed: Card = { ...card('B4', 'backlog'), title: 'Tidy Up', details: { etag: 'W/"B4d"', description: '<!-- board-src: alpha/backlog.md#0123456789ab -->\n\nx', checklist: [] } }
+  const cards = [card('B1', 'backlog'), card('B2', 'sprint_backlog'), card('B3', 'in_review'), keyed]
+  const pr = (number: number, author: string, state: string, title: string, branch = '') =>
+    ({ repo: 'alpha', number, title, author, state, isDraft: false, mergedAt: null, updatedAt: '', branch }) as Pr
   const prs: Pr[] = [
-    { repo: 'alpha', number: 174, title: 't', author: 'owner-login', state: 'OPEN', isDraft: false, mergedAt: null, updatedAt: '', branch: '' },
-    { repo: 'alpha', number: 133, title: 't', author: 'someone', state: 'OPEN', isDraft: false, mergedAt: null, updatedAt: '', branch: '' },
-    { repo: 'alpha', number: 160, title: 't', author: 'owner-login', state: 'MERGED', isDraft: false, mergedAt: 'x', updatedAt: '', branch: '' },
+    pr(174, 'owner-login', 'OPEN', 'Cache parsed pages per input'),
+    pr(133, 'someone', 'OPEN', 'Cache parsed pages per input'),
+    pr(160, 'owner-login', 'MERGED', 'Cache parsed pages per input'),
+    pr(175, 'owner-login', 'OPEN', 'Release 0.12.0'),
+    pr(176, 'owner-login', 'OPEN', 'Small fix', 'feature/0123456789ab-tidy'),
   ]
-  const ctx: Context = { ...NO_CONTEXT, standText: '# Stand\n\n## Läuft\n- Cache work runs on branch feature/cache\n' }
+  const STAND = '# Stand\n\n## Offen\n- Cache work runs on branch feature/cache\n---\n\n## Erledigt\n- Old work runs no more\n\n## Nächster Schritt\n1. Then the docs run\n'
+  const ctx: Context = { ...NO_CONTEXT, standText: STAND }
   const start = (taskId: string, progress?: unknown) => ({ action: 'move', taskId, bucket: 'in_progress', ...(progress === undefined ? {} : { progress }), evidence: 'x' })
   const check = (rows: unknown[], on: Context = ctx) => {
     const checked = checkProposal({ rows }, cards, prs, CFG, on)
@@ -874,9 +880,33 @@ describe('In Progress', () => {
     const viaPr = check([start('B1', { pr: 174, repo: 'alpha' }), { action: 'assign', taskId: 'B1' }])
     expect(viaPr.dropped).toEqual([])
     expect(viaPr.rows.map(r => r.action)).toEqual(['move', 'assign'])
-    expect(viaPr.rows[0]?.evidence).toBe('Läuft: PR alpha#174 – x')
+    expect(viaPr.rows[0]?.evidence).toBe('Läuft: PR alpha#174 „Cache parsed pages per input“ – x')
     const viaLine = check([start('B2', { standLine: 'Cache work runs on branch feature/cache' })])
     expect(viaLine.rows[0]?.evidence).toBe('Läuft: „Cache work runs on branch feature/cache“ – x')
+    expect(check([start('B2', { standLine: 'Then the docs run' })]).rows).toHaveLength(1)
+    // A PR whose branch carries the card's source hash names it too.
+    expect(check([start('B4', { pr: 176, repo: 'alpha' })]).rows).toHaveLength(1)
+  })
+
+  test('a PR of the owner that does not name the card, or a line outside the running sections: dropped', () => {
+    for (const progress of [
+      { pr: 175, repo: 'alpha' },
+      { standLine: 'Old work runs no more' },
+      { standLine: '## Offen' },
+      { standLine: 'Offen' },
+      { standLine: '---' },
+      { standLine: '' },
+    ]) {
+      const { rows, dropped } = check([start('B1', progress)])
+      expect([progress, rows]).toEqual([progress, []])
+      expect(dropped[0]).toContain('In Progress nur mit')
+    }
+    expect(check([start('B4', { pr: 174, repo: 'alpha' })]).rows).toEqual([])
+  })
+
+  test('a start stands unticked in the pane', () => {
+    const { rows } = check([start('B1', { pr: 174, repo: 'alpha' })])
+    expect(paneRows(rows, cards)[0]?.isChecked).toBe(false)
   })
 
   test('no proof, someone else’s PR, a merged PR, a piece of a line, no stand file: dropped', () => {
