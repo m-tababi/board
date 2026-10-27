@@ -139,7 +139,8 @@ That a new card's title and content fit its source entry is **not** checked by m
 - **Optimistic writes.** Every PATCH carries `If-Match` with the ETag read before; a card changed since, or a 412, is skipped. Assignments are compared before and after each task PATCH; an unexpected change stops the run.
 - **Bounded time.** No card starts after 120 s, each `az` call is cut at 30 s, the plugin kills the script at 330 s and shows every row the JSONL report holds; a row without a line is marked unknown.
 - **Guard.** A `tool.call` hook refuses Bash commands that literally name the write script by its path (`board/apply.py`, or a cache copy `board/<version>/apply.py`) or run `apply.py` with a python interpreter, whatever wraps it (`sh -c`, `eval`, `sudo`, `if … then`). The mod's test file (`tests/test_apply.py`) and `python -m pytest tests/` pass. A heredoc or a commit message that names the script may trip it too. Together with the deny rules above it catches accidents.
-- **Honest limits.** The guard is a tripwire, not a boundary: a variable or a renamed copy gets past it, and a model that can write files could forge a confirmation. If your settings already let the model write to Planner (an MCP server, `az` in an allowed command), the plugin adds no barrier against that. The real boundary is who holds the Planner rights.
+- **Run files.** Write, Edit and NotebookEdit calls on `~/.claude/board/confirm.json` or a `proposals-*.json` there are refused (with `~`, `.` and `..` resolved); only the plugin itself writes them.
+- **Honest limits.** The guard is a tripwire, not a boundary: a variable or a renamed copy gets past it, and a shell command (`echo … > confirm.json`) can still write a confirmation. If your settings already let the model write to Planner (an MCP server, `az` in an allowed command), the plugin adds no barrier against that. The real boundary is who holds the Planner rights.
 
 ## The reminder
 
