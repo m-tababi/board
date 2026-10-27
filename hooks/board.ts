@@ -10,7 +10,7 @@ export const MAX_ROWS = 30
 // A new card's title is shown whole in the table, so it is short.
 export const MAX_CREATE_TITLE = 70
 // New cards and pulls into the Sprint Backlog per run.
-export const MAX_CREATES = 5
+export const MAX_CREATES = 15
 export const MAX_SPRINT = 3
 export const DEFAULT_SKILL_PATH = '~/.claude/skills/create-backlog/SKILL.md'
 // The create-backlog format, as far as a machine can check it (apply.py checks the same).
@@ -20,6 +20,19 @@ const TITLE_MARKUP_RE = /[`*_[]|\]\(/
 // A heading's date prefix ("2026-10-20 — …"): post-backlog drops it from the title.
 const DATE_TITLE_RE = /^\s*\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}\s*[—–]/
 const MAX_TASKS = 40
+// The story every new or rewritten card carries, word for word, and one card in full (the skill's own example).
+export const STORY_TEMPLATE = 'As a developer, I want to <goal> so that <value>.'
+const EXAMPLE_CARD = {
+  title: 'Set Up Qdrant as Local Vector Store',
+  priority: 'Important',
+  userStory: 'As a developer, I want to set up Qdrant as the local vector store for the RAG pipeline so that embeddings can be stored and queried reliably.',
+  tasks: ['Install and run Qdrant locally via Docker', 'Define collection schema and configure embedding dimensions', 'Test insert and query operations end-to-end'],
+  acceptanceCriteria: [
+    'Qdrant runs stable locally via Docker',
+    'Collection schema and embedding dimensions are configured correctly',
+    'Insert and query operations return expected results',
+  ],
+}
 export const STALE_DAYS = 7
 const DAY_MS = 24 * 60 * 60 * 1000
 
@@ -411,6 +424,9 @@ export function systemPrompt(cfg: Config, skill: string | null, hasNextSteps: bo
     skill === null
       ? 'create: not available in this run (the create-backlog skill could not be read); propose no create.'
       : `create: a new card only for an open entry of a backlog file that no card covers: no card has its title (check the done titles too) and no open card carries its <!-- board-src: … --> line. Never invent work: every new card belongs to exactly one backlog entry, and its content comes only from that entry's text. At most ${MAX_CREATES}. The card follows the create-backlog skill below exactly: English, its title rules, a user story "As a developer, I want to … so that ….", priority one of ${PRIORITIES.join(', ')}, tasks, 3 to 5 acceptance criteria. Step 6 of the skill (writing to backlog.md) does not apply: you only fill the fields. The card goes to backlog, unassigned. source.file is the backlog file's name as given before its bracket (e.g. ${cfg.backlogSources[0] === undefined ? 'repo/backlog.md' : `${cfg.backlogSources[0].repo}/${cfg.backlogSources[0].path}`}); source.heading is the entry's heading exactly as it stands after "## ".
+The user story is exactly "${STORY_TEMPLATE}": it starts with the words "As a developer, I want to " (never "I want the", "I want a" or "I want X to"), then "so that", and it ends with a full stop. A full card, as the skill's example reads:
+${JSON.stringify(EXAMPLE_CARD)}
+Before you answer, check every create against this template field by field: title (plain English, no date, no backticks or markdown), priority, the exact story form, 1 or more tasks, 3 to 5 acceptance criteria. A row that does not fit is dropped unseen; fix it or leave it out.
 source: an open card that already covers a backlog entry but has no <!-- board-src: … --> line at the top of its description -> propose source with that entry, instead of a create.
 
 <create-backlog-skill>

@@ -608,13 +608,13 @@ describe('new cards in the create-backlog format', () => {
     expect(check([create(), create({ title: 'Cache Pages Again' })], ctx).rows).toHaveLength(1)
   })
 
-  test('at most five new cards per run', async () => {
-    const text = Array.from({ length: 7 }, (_, i) => `## Entry Number ${i}\ntext`).join('\n')
+  test('at most fifteen new cards per run', async () => {
+    const text = Array.from({ length: 17 }, (_, i) => `## Entry Number ${i}\ntext`).join('\n')
     const ctx = await contextFor(text)
-    const rows = Array.from({ length: 7 }, (_, i) => create({ title: `Entry Number ${i}`, source: { file: 'alpha/backlog.md', heading: `Entry Number ${i}` } }))
+    const rows = Array.from({ length: 17 }, (_, i) => create({ title: `Entry Number ${i}`, source: { file: 'alpha/backlog.md', heading: `Entry Number ${i}` } }))
     const checked = check(rows, ctx)
-    expect(checked.rows).toHaveLength(5)
-    expect(checked.dropped).toEqual(['Vorschlag 6: mehr als 5 neue Karten', 'Vorschlag 7: mehr als 5 neue Karten'])
+    expect(checked.rows).toHaveLength(15)
+    expect(checked.dropped).toEqual(['Vorschlag 16: mehr als 15 neue Karten', 'Vorschlag 17: mehr als 15 neue Karten'])
   })
 
   test('without the skill file no card is created', async () => {
@@ -1167,6 +1167,10 @@ describe('a board run in the pane', () => {
     await until(seen, view, 'Übernehmen (1)')
 
     expect(seen.prompts[0]?.system).toContain('<create-backlog-skill>\n# Create Backlog\nSKILL BODY verbatim\n</create-backlog-skill>')
+    // The exact story form and one full card, with the order to check every create against them.
+    expect(seen.prompts[0]?.system).toContain('The user story is exactly "As a developer, I want to <goal> so that <value>."')
+    expect(seen.prompts[0]?.system).toContain('"userStory":"As a developer, I want to set up Qdrant as the local vector store')
+    expect(seen.prompts[0]?.system).toContain('Before you answer, check every create against this template')
     expect(seen.prompts[0]?.prompt).toContain('## Next steps (the stand file\'s section)\nWrite the parser docs next.')
     await view.press({ key: 'row:1' })
     const open = await until(seen, view, `Quelle: alpha/backlog.md › ${CACHE}`)

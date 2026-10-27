@@ -51,7 +51,7 @@ TITLE_MARKUP_RE = re.compile(r"[`*_\[]|\]\(")
 DATE_TITLE_RE = re.compile(r"^\s*\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}\s*[—–]")
 MAX_TASKS = 40
 # New cards per run, as the mod allows.
-MAX_CREATES = 5
+MAX_CREATES = 15
 MAX_CHECKLIST = 20
 SOURCE_FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}/[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$")
 AZ_TIMEOUT_S = 30
