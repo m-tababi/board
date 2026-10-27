@@ -2,16 +2,15 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import {
-  ANSWER_NO,
-  ANSWER_YES,
   GRAPH,
   PILL,
   PILL_BUSY,
-  askText,
+  RESULT_LABEL,
   backlogDigest,
   cardFrom,
   changelogHead,
   checkProposal,
+  checkedRows,
   clean,
   detailsFrom,
   extractJson,
@@ -19,6 +18,7 @@ import {
   isStamped,
   lastRunMarkdown,
   outcomeFrom,
+  paneRows,
   parseConfig,
   pillFits,
   prFrom,
@@ -26,18 +26,28 @@ import {
   proposalDocument,
   reminder,
   reportOutcome,
-  resultLines,
-  selectedRows,
   sha256Hex,
   stamp,
   systemPrompt,
   tableLines,
 } from './board'
-import type { Card, Config, Outcome, Pr, RepoFile, Sources } from './board'
+import type { Card, Config, Outcome, Pr, RepoFile, Row, Sources } from './board'
+import type { BoardCounts, BoardPhase, BoardResult, BoardRow } from '../types'
+
+const PANE = 'board-update'
+const PANE_TITLE = 'Board Update'
+const NO_COUNTS: BoardCounts = { cards: -1, prs: -1, backlog: -1, unreadable: 0, dropped: [] }
 
 const running = atom({ plugin: 'board', key: 'running' } as const, false)
 const isTurnRunning = atom({ plugin: 'board', key: 'isTurnRunning' } as const, false)
 const startupChecked = atom({ plugin: 'board', key: 'startupChecked' } as const, false)
+const phase = atom({ plugin: 'board', key: 'phase' } as const, 'idle' as BoardPhase, { shape: 'phase-1' })
+const rows = atom({ plugin: 'board', key: 'rows' } as const, [] as BoardRow[], { shape: 'rows-1' })
+const results = atom({ plugin: 'board', key: 'results' } as const, [] as BoardResult[], { shape: 'results-1' })
+const startedAt = atom({ plugin: 'board', key: 'startedAt' } as const, 0, { shape: 'startedAt-1' })
+const tick = atom({ plugin: 'board', key: 'tick' } as const, 0, { shape: 'tick-1' })
+const counts = atom({ plugin: 'board', key: 'counts' } as const, NO_COUNTS, { shape: 'counts-1' })
+const note = atom({ plugin: 'board', key: 'note' } as const, '', { shape: 'note-1' })
 
 const AZ_TIMEOUT_MS = 60_000
 const GH_TIMEOUT_MS = 60_000
@@ -49,7 +59,16 @@ const MAX_TOKENS = 16_000
 const DETAILS_AT_ONCE = 6
 const TOAST_MS = 8000
 const GUARD_REFUSAL =
-  'apply.py schreibt aufs Planner-Board und läuft nur über den board-Mod nach Bestätigung im Mod (Knopf ▦ Board oder /board), nie per Bash.'
+  'apply.py schreibt aufs Planner-Board und läuft nur über den board-Mod nach Bestätigung im Fenster „Board Update“ (Knopf ▦ Board oder /board), nie per Bash.'
+
+// What a run holds between the proposal and the press on Übernehmen; a hot
+// reload drops it with the module (the pane then asks for a new run).
+type Pending = { cfg: Config; dir: string; at: string; now: number; file: string; hash: string; rows: Row[]; isComplete: boolean }
+let pending: Pending | null = null
+// The model call of the run in flight, for Abbrechen.
+let stop: AbortController | null = null
+let isCancelled = false
+let ticker: { cancel: () => void } | null = null
 
 function toast($: EngineInterface, text: string): void {
   $.ui.toast(text, { timeoutMs: TOAST_MS })
@@ -120,11 +139,27 @@ function baseName(path: string): string {
   return path.split('/').pop() ?? path
 }
 
-async function collect($: EngineInterface, cfg: Config, today: string, homeDir: string): Promise<Sources & { unreadable: number }> {
+// The number of entries (## headings) in the backlog files.
+function entryCount(texts: string[]): number {
+  return texts.reduce((sum, text) => sum + text.split('\n').filter(line => line.startsWith('## ')).length, 0)
+}
+
+type Counted = (patch: Partial<BoardCounts>) => Promise<void>
+
+async function collect($: EngineInterface, cfg: Config, today: string, homeDir: string, counted: Counted): Promise<Sources & { unreadable: number }> {
   const [{ cards, unreadable }, prs, backlogs, changelog] = await Promise.all([
-    readCards($, cfg),
-    Promise.all(Object.keys(cfg.repos).map(repo => readPrs($, cfg, repo))),
-    Promise.all(cfg.backlogSources.map(file => readRepoFile($, cfg, file))),
+    readCards($, cfg).then(async got => {
+      await counted({ cards: got.cards.length, unreadable: got.unreadable })
+      return got
+    }),
+    Promise.all(Object.keys(cfg.repos).map(repo => readPrs($, cfg, repo))).then(async lists => {
+      await counted({ prs: lists.flat().length })
+      return lists
+    }),
+    Promise.all(cfg.backlogSources.map(file => readRepoFile($, cfg, file))).then(async texts => {
+      await counted({ backlog: entryCount(texts) })
+      return texts
+    }),
     cfg.changelog === undefined ? Promise.resolve(null) : readRepoFile($, cfg, cfg.changelog),
   ])
   const files = cfg.backlogSources.map((file, i) => ({
@@ -161,9 +196,61 @@ function isoDate(at: number): string {
   return stamp(at).slice(0, 10)
 }
 
-// The whole run behind the pill and /board: collect, judge, show, ask, apply.
-// Answers a one-line summary without card contents (it may reach Claude).
-async function runBoard($: EngineInterface, isWorkingAtDraw = false): Promise<string> {
+// ---- the pane's phases ---------------------------------------------------------
+
+async function setPhase($: EngineInterface, next: BoardPhase, line = ''): Promise<void> {
+  const now = await $.clock.now()
+  await update($, startedAt, () => now)
+  await update($, tick, () => now)
+  await update($, note, () => line)
+  await update($, phase, () => next)
+}
+
+// The elapsed seconds redraw once a second, only while a phase runs.
+function startTicker($: EngineInterface): void {
+  if (ticker !== null) return
+  ticker = $.clock.every(1000, () => {
+    void $.clock
+      .now()
+      .then(now => update($, tick, () => now))
+      .catch(() => undefined)
+  })
+}
+
+function stopTicker(): void {
+  ticker?.cancel()
+  ticker = null
+}
+
+async function openPane($: EngineInterface): Promise<void> {
+  await $.ui.open({ id: PANE, title: PANE_TITLE }).catch(() => undefined)
+}
+
+async function closePane($: EngineInterface): Promise<void> {
+  await $.ui.close({ id: PANE }).catch(() => undefined)
+}
+
+// The end of a run: the pill is free again; the pane keeps what it shows.
+async function finish($: EngineInterface): Promise<void> {
+  stopTicker()
+  pending = null
+  stop = null
+  $.ui.status(undefined)
+  await update($, running, () => false)
+}
+
+// A look at the board counts as a review only when every card could be read.
+async function stampReview($: EngineInterface, isComplete: boolean, now: number): Promise<void> {
+  if (isComplete) await $.store.set('lastRunAt', now)
+}
+
+// ---- the run ---------------------------------------------------------------------
+
+// The run behind the pill and /board: collect, judge, show in the pane; the
+// press on Übernehmen writes. Answers a one-line summary without card
+// contents (it may reach Claude). Without a surface (a -p run) it is a dry run
+// whose table goes to the transcript log.
+async function runBoard($: EngineInterface, hasSurface: boolean, isWorkingAtDraw = false): Promise<string> {
   if (isWorkingAtDraw || (await read($, isTurnRunning))) {
     toast($, 'Claude arbeitet gerade – Board-Abgleich nach der Antwort.')
     return 'Board-Abgleich nicht gestartet: Claude arbeitet gerade.'
@@ -175,109 +262,185 @@ async function runBoard($: EngineInterface, isWorkingAtDraw = false): Promise<st
     return true
   })
   if (!isMine) {
-    toast($, 'Board-Abgleich läuft bereits.')
+    toast($, 'Board-Abgleich läuft bereits – Fenster „Board Update“.')
     return 'Board-Abgleich läuft bereits.'
   }
 
+  isCancelled = false
+  let isHeld = false
   try {
-    return await reconcile($)
+    const ran = await reconcile($, hasSurface)
+    isHeld = ran.isHeld
+    return ran.text
   } catch (err) {
     const why = clean(err instanceof Error ? err.message : String(err), 200)
-    log($, `Board: abgebrochen – ${why}`)
-    toast($, 'Board-Abgleich abgebrochen (siehe Verlauf).')
+    if (hasSurface) await setPhase($, 'failed', `Abgebrochen – ${why}`)
+    else log($, `Board: abgebrochen – ${why}`)
+    toast($, 'Board-Abgleich abgebrochen (siehe Fenster „Board Update“).')
     return `Board-Abgleich abgebrochen: ${why}`
   } finally {
-    $.ui.status(undefined)
-    await update($, running, () => false)
+    // A proposal waiting in the pane keeps the run until it is applied or cancelled.
+    if (!isHeld) await finish($)
   }
 }
 
-async function reconcile($: EngineInterface): Promise<string> {
+async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ text: string; isHeld: boolean }> {
   const homeDir = await home($)
   const dir = `${homeDir}/.claude/board`
   // A confirmation an earlier run left behind (apply.py never started) goes first.
   await $.process.run(['/usr/bin/rm', '-f', `${dir}/confirm.json`], { timeoutMs: 10_000 })
+  await update($, rows, () => [])
+  await update($, results, () => [])
+  await update($, counts, () => NO_COUNTS)
+  if (hasSurface) {
+    await setPhase($, 'collecting')
+    startTicker($)
+  }
   const cfg = await readConfig($, dir)
   const now = await $.clock.now()
   const at = stamp(now)
 
   $.ui.status('▦ Board: sammelt …')
-  const sources = await collect($, cfg, isoDate(now), homeDir)
+  const counted: Counted = async patch => {
+    await update($, counts, c => ({ ...c, ...patch }))
+  }
+  const sources = await collect($, cfg, isoDate(now), homeDir, counted)
+  if (isCancelled) {
+    // Nothing was judged: no review.
+    return { text: 'Board-Abgleich abgebrochen.', isHeld: false }
+  }
   await $.fs.write(`${dir}/snapshot-${at}.json`, `${JSON.stringify({ at, cards: sources.cards, prs: sources.prs }, null, 2)}\n`)
   const prompt = promptFor(sources, cfg)
   // Cards that could not be read are not judged; such a run is no full review.
   const isComplete = sources.unreadable === 0
-  if (!isComplete) log($, `Board: Achtung – ${sources.unreadable} Karte(n) unlesbar, nicht bewertet.`)
+  if (!isComplete && !hasSurface) log($, `Board: Achtung – ${sources.unreadable} Karte(n) unlesbar, nicht bewertet.`)
 
+  if (hasSurface) await setPhase($, 'thinking')
   $.ui.status('▦ Board: Opus bewertet …')
-  const reply = await $.model.complete({
-    model: 'opus',
-    effort: 'medium',
-    system: systemPrompt(cfg),
-    prompt,
-    maxTokens: MAX_TOKENS,
-    timeoutMs: MODEL_TIMEOUT_MS,
-  })
+  stop = new AbortController()
+  const reply = await $.model.complete(
+    { model: 'opus', effort: 'medium', system: systemPrompt(cfg), prompt, maxTokens: MAX_TOKENS, timeoutMs: MODEL_TIMEOUT_MS },
+    { signal: stop.signal },
+  )
+  if (isCancelled || (!reply.isAnswered && reply.reason === 'aborted')) {
+    // Abbrechen while Opus judged: the board was looked at, as a deliberate no.
+    await stampReview($, isComplete, now)
+    return { text: 'Board-Abgleich abgebrochen.', isHeld: false }
+  }
   if (!reply.isAnswered) {
     throw new Error(`keine Bewertung (${reply.reason}${reply.reason === 'api-error' ? ` ${reply.status ?? ''} ${reply.error}` : ''})`)
   }
   await $.fs.write(`${dir}/reply-${at}.txt`, reply.text)
-  log(
-    $,
-    `Board: ${sources.cards.length} Karten, ${sources.prs.length} PRs gelesen; Eingabe ${prompt.length} Zeichen = ${reply.usage.input_tokens} Token, Antwort ${reply.usage.output_tokens} Token.`,
-  )
 
   const checked = checkProposal(extractJson(reply.text), sources.cards, sources.prs, cfg)
   if (typeof checked === 'string') throw new Error(`Bewertung unbrauchbar: ${checked} (Rohantwort reply-${at}.txt)`)
-  for (const line of checked.dropped) log($, `Board: verworfen – ${clean(line, 200)}`)
+  await update($, counts, c => ({ ...c, dropped: checked.dropped.map(line => clean(line, 200)) }))
   if (checked.rows.length === 0) {
-    if (isComplete) await $.store.set('lastRunAt', now)
-    log($, 'Board: keine Änderungen vorgeschlagen – Board passt zum Stand.')
-    return 'Board-Abgleich: keine Änderungen vorgeschlagen.'
+    await stampReview($, isComplete, now)
+    if (hasSurface) await setPhase($, 'done', 'Keine Änderungen vorgeschlagen – Board passt zum Stand.')
+    else log($, 'Board: keine Änderungen vorgeschlagen – Board passt zum Stand.')
+    return { text: 'Board-Abgleich: keine Änderungen vorgeschlagen.', isHeld: false }
   }
 
   const file = `${dir}/proposals-${at}.json`
   const document = proposalDocument(checked.rows, new Date(now).toISOString(), cfg.planId)
   await $.fs.write(file, document)
   const hash = await sha256Hex(document)
-  for (const line of tableLines(checked.rows)) log($, line)
-  log($, `Board: Datei ${file}, sha256 ${hash}`)
-  $.ui.status('▦ Board: wartet auf Antwort …')
 
-  let answer: string
-  try {
-    answer = await $.ui.ask(askText(checked.rows.length, `proposals-${at}.json`), { options: [ANSWER_YES, ANSWER_NO], header: 'Board' })
-  } catch {
-    log($, 'Board: keine Antwort – nichts ausgeführt.')
-    return `Board-Abgleich: ${checked.rows.length} Vorschläge gezeigt, keine Antwort, nichts ausgeführt.`
-  }
-  const selected = selectedRows(answer, checked.rows.length)
-  if (selected === null) {
-    const isNo = answer.trim() === ANSWER_NO
-    // A deliberate no is a review: the board was seen and judged.
-    if (isNo && isComplete) await $.store.set('lastRunAt', now)
-    const why = isNo ? 'abgelehnt' : `Antwort „${clean(answer, 40)}“ ist nicht „ja“, „nein“ oder „ja außer n, …“`
-    log($, `Board: ${why} – nichts ausgeführt.`)
-    return 'Board-Abgleich: nichts ausgeführt.'
+  if (!hasSurface) {
+    log($, `Board: ${sources.cards.length} Karten, ${sources.prs.length} PRs gelesen; Eingabe ${prompt.length} Zeichen = ${reply.usage.input_tokens} Token.`)
+    for (const line of checked.dropped) log($, `Board: verworfen – ${clean(line, 200)}`)
+    for (const line of tableLines(checked.rows)) log($, line)
+    log($, `Board: Datei ${file}, sha256 ${hash}`)
+    return { text: `Board-Abgleich: ${checked.rows.length} Vorschläge gezeigt (Trockenlauf ohne Oberfläche), nichts ausgeführt.`, isHeld: false }
   }
 
-  // The one-time confirmation apply.py insists on; it deletes it on reading.
-  await $.fs.write(`${dir}/confirm.json`, JSON.stringify({ sha256: hash, rows: selected, at: await $.clock.now() }))
-  $.ui.status('▦ Board: schreibt …')
+  pending = { cfg, dir, at, now, file, hash, rows: checked.rows, isComplete }
+  await update($, rows, () => paneRows(checked.rows, sources.cards))
+  await setPhase($, 'ready')
+  stopTicker()
+  $.ui.status('▦ Board: wartet auf Bestätigung im Fenster …')
+  return { text: `Board-Abgleich: ${checked.rows.length} Vorschläge im Fenster „Board Update“.`, isHeld: true }
+}
+
+// Übernehmen (n): the checked rows go to apply.py with the one-time confirmation.
+async function applyChecked($: EngineInterface): Promise<void> {
+  if ((await read($, phase)) !== 'ready') return
+  const held = pending
+  if (held === null) {
+    await setPhase($, 'failed', 'Vorschläge nach dem Neuladen verloren – Lauf neu starten.')
+    await finish($)
+    return
+  }
+  const selected = checkedRows(await read($, rows))
+  if (selected.length === 0) {
+    // Nothing taken over is a deliberate no: a review, nothing written.
+    await stampReview($, held.isComplete, held.now)
+    await closePane($)
+    await setPhase($, 'idle')
+    toast($, 'Board: nichts übernommen.')
+    await finish($)
+    return
+  }
+
+  await setPhase($, 'applying')
+  startTicker($)
+  const { dir, at, file, hash, cfg } = held
   const report = `${dir}/apply-${at}.jsonl`
-  const argv = [cfg.pythonPath, '-I', `${$.plugin.root}/apply.py`, '--proposals', file, '--rows', selected.join(','), '--sha256', hash, '--report', report]
-  const ran = await $.process.run(argv, { timeoutMs: APPLY_TIMEOUT_MS }).catch(() => null)
-  // Killed at the timeout or without a result: the report holds every row it got to.
-  const outcome: Outcome =
-    (ran === null ? null : outcomeFrom(ran.stdout)) ?? reportOutcome(await $.fs.read(report).catch(() => ''), selected)
-  for (const line of resultLines(checked.rows, outcome)) log($, line)
-  await $.fs.write(`${dir}/last-run.md`, lastRunMarkdown(at, file, checked.rows, outcome))
-  if (isStamped(outcome)) await $.store.set('lastRunAt', now)
+  // The rows reach the pane as apply.py reports them.
+  const poll = $.clock.every(1000, () => {
+    void $.fs
+      .read(report)
+      .then(text => update($, results, () => reportOutcome(text).rows))
+      .catch(() => undefined)
+  })
+  try {
+    // The one-time confirmation apply.py insists on; it deletes it on reading.
+    await $.fs.write(`${dir}/confirm.json`, JSON.stringify({ sha256: hash, rows: selected, at: await $.clock.now() }))
+    $.ui.status('▦ Board: schreibt …')
+    const argv = [cfg.pythonPath, '-I', `${$.plugin.root}/apply.py`, '--proposals', file, '--rows', selected.join(','), '--sha256', hash, '--report', report]
+    const ran = await $.process.run(argv, { timeoutMs: APPLY_TIMEOUT_MS }).catch(() => null)
+    // The report holds every row apply.py got to, flushed line by line; killed at
+    // the timeout it lacks its last line and the rows not in it are unknown.
+    const text = await $.fs.read(report).catch(() => '')
+    const fromReport = reportOutcome(text, selected)
+    const outcome: Outcome = text.includes('"final": true') ? fromReport : ((ran === null ? null : outcomeFrom(ran.stdout)) ?? fromReport)
+    poll.cancel()
+    await update($, results, () => outcome.rows)
+    await $.fs.write(`${dir}/last-run.md`, lastRunMarkdown(at, file, held.rows, outcome))
+    if (isStamped(outcome)) await $.store.set('lastRunAt', held.now)
+    const ok = outcome.rows.filter(r => r.result === 'ok').length
+    const head = outcome.status === 'ok' ? `Ausgeführt: ${ok} von ${selected.length} Zeilen ok.` : `ABGEBROCHEN – ${clean(outcome.reason, 200)}`
+    await setPhase($, 'done', head)
+    toast($, outcome.status === 'ok' ? `Board: ${ok} von ${selected.length} Zeilen ausgeführt.` : 'Board: Lauf abgebrochen (siehe Fenster).')
+  } catch (err) {
+    await setPhase($, 'failed', `Abgebrochen – ${clean(err instanceof Error ? err.message : String(err), 200)}`)
+  } finally {
+    poll.cancel()
+    await finish($)
+  }
+}
 
-  const ok = outcome.rows.filter(r => r.result === 'ok').length
-  const summary = outcome.status === 'ok' ? `Board: ${ok} von ${selected.length} Zeilen ausgeführt.` : 'Board: Lauf abgebrochen (siehe Verlauf).'
-  toast($, summary)
-  return summary
+// Abbrechen, or the pane closed by the person: what it means depends on the phase.
+async function cancel($: EngineInterface, isClosing: boolean): Promise<void> {
+  const now = await read($, phase)
+  if (now === 'collecting' || now === 'thinking') {
+    // The run ends itself: after the read (no review), or as the model call returns aborted.
+    isCancelled = true
+    stop?.abort()
+    await setPhase($, 'idle')
+  } else if (now === 'ready') {
+    const held = pending
+    if (held !== null) await stampReview($, held.isComplete, held.now)
+    await setPhase($, 'idle')
+    await finish($)
+  } else if (now === 'applying') {
+    // apply.py runs to its end; its rows land in the report and last-run.md.
+    return
+  } else {
+    await setPhase($, 'idle')
+  }
+  if (!isClosing) await closePane($)
 }
 
 async function remind($: EngineInterface): Promise<void> {
@@ -292,11 +455,35 @@ async function remind($: EngineInterface): Promise<void> {
   if (text !== null) toast($, text)
 }
 
+// The pill's press: the pane opens as the answer to the press, then the run starts.
+async function startFromPress($: EngineInterface, isWorking: boolean): Promise<void> {
+  if (isWorking || (await read($, isTurnRunning))) {
+    await runBoard($, true, true)
+    return
+  }
+  await openPane($)
+  await runBoard($, true)
+}
+
+function elapsed(since: number, now: number): string {
+  return `${Math.max(0, Math.round((now - since) / 1000))} s`
+}
+
+function countLine(c: BoardCounts): string {
+  const parts = [c.cards >= 0 ? `${c.cards} Karten` : '', c.prs >= 0 ? `${c.prs} PRs` : '', c.backlog >= 0 ? `${c.backlog} Backlog-Einträge` : '']
+  return parts.filter(p => p !== '').join(' · ')
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     // A run in flight is lost with the old environment on a hot reload.
     await update($, running, () => false)
-    await $.command.register({ name: 'board', description: 'Planner-Board mit Repo-Stand abgleichen (Vorschläge zeigen, nach „ja“ ausführen)' })
+    const was = await read($, phase)
+    if (was !== 'done' && was !== 'failed') {
+      await update($, rows, () => [])
+      await update($, phase, () => 'idle')
+    }
+    await $.command.register({ name: 'board', description: 'Planner-Board mit Repo-Stand abgleichen (Fenster „Board Update“: Vorschläge an- und abwählen, übernehmen)' })
     const started = await next(e)
     if (e.isInteractive) {
       void remind($).catch(() => undefined)
@@ -305,17 +492,28 @@ export const register: Register = on => {
   })
 
   on('command.run', { command: 'board' }, async $ => {
-    // No surface (a -p run): no one can confirm, so the run stops after the
-    // table; it is awaited here, as nothing is asked mid-turn.
+    // No surface (a -p run): no one can confirm, so the run is a dry run whose
+    // table goes to the log; it is awaited here.
     if ((await $.session.surfaces()).length === 0) {
-      return { text: await runBoard($) }
+      return { text: await runBoard($, false) }
     }
-    // The question runs from a timer: this hook must not wait on it.
+    if (await read($, isTurnRunning)) {
+      return { text: await runBoard($, true) }
+    }
+    await openPane($)
+    if (await read($, running)) return { text: 'Board-Abgleich läuft bereits – Fenster „Board Update“.' }
+    // The run goes on from a timer: this hook must not wait on it.
     $.clock.after(0, () => {
-      void runBoard($).catch(() => undefined)
+      void runBoard($, true).catch(() => undefined)
     })
-    return { text: 'Board-Abgleich gestartet – Tabelle und Rückfrage folgen.' }
+    return { text: 'Board-Abgleich gestartet – Fenster „Board Update“.' }
   }).catch(() => ({ text: 'board: Befehl fehlgeschlagen.' }))
+
+  // The person's close mark or key on the pane counts as Abbrechen.
+  on('ui.close', async ($, e, next) => {
+    if (e.id === PANE && e.origin.kind === 'person') await cancel($, true)
+    return next(e)
+  }).catch(($, e, next) => next(e))
 
   // Second net beside the deny rule: the main model never runs apply.py.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => (isApplyCall(e.command) ? { deny: GUARD_REFUSAL } : next(e))).catch(
@@ -344,6 +542,111 @@ export const register: Register = on => {
     return next(e)
   }).catch(($, e, next) => next(e))
 
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Box, Button, Text } = $.ui.resolve(e)
+    const now = await read($, phase)
+    const list = await read($, rows)
+    const done = await read($, results)
+    const since = await read($, startedAt)
+    const clock = await read($, tick)
+    const c = await read($, counts)
+    const line = await read($, note)
+    const toggle = (n: number, field: 'isChecked' | 'isOpen') => update($, rows, l => l.map(r => (r.n === n ? { ...r, [field]: !r[field] } : r)))
+    const close = (
+      <Button key="close" role="dismiss" onPress={() => void cancel($, false).catch(() => undefined)}>
+        Schließen
+      </Button>
+    )
+    const counted = countLine(c)
+    const unreadable = c.unreadable > 0 ? <Text color="warning">Achtung – {c.unreadable} Karte(n) unlesbar, nicht bewertet.</Text> : null
+
+    if (now === 'idle') {
+      return (
+        <Box flexDirection="column">
+          <Text dimColor>Kein Lauf. Knopf ▦ Board oder /board startet einen.</Text>
+          {close}
+        </Box>
+      )
+    }
+    if (now === 'collecting' || now === 'thinking') {
+      return (
+        <Box flexDirection="column">
+          <Text>
+            {now === 'collecting' ? 'Sammelt …' : 'Opus denkt …'} {elapsed(since, clock)}
+          </Text>
+          {counted !== '' && <Text dimColor>{counted}</Text>}
+          {unreadable}
+          <Button key="cancel" role="dismiss" onPress={() => void cancel($, false).catch(() => undefined)}>
+            Abbrechen
+          </Button>
+        </Box>
+      )
+    }
+    if (now === 'failed') {
+      return (
+        <Box flexDirection="column">
+          <Text color="error">{line}</Text>
+          {close}
+        </Box>
+      )
+    }
+
+    const resultOf = new Map(done.map(r => [r.n, r]))
+    const chosen = list.filter(r => r.isChecked).length
+    return (
+      <Box flexDirection="column">
+        {now === 'applying' && <Text>Schreibt … {elapsed(since, clock)}</Text>}
+        {now === 'done' && <Text bold>{line}</Text>}
+        {now === 'ready' && <Text dimColor>{[counted, `${list.length} Vorschläge`].filter(p => p !== '').join(' · ')}</Text>}
+        {unreadable}
+        {list.map(r => {
+          const got = resultOf.get(r.n)
+          const outcome = got === undefined ? '' : ` → ${RESULT_LABEL[got.result] ?? clean(got.result, 20)}${got.detail === '' ? '' : ` (${clean(got.detail, 120)})`}`
+          return (
+            <Box key={`row-${r.n}`} flexDirection="column">
+              <Box>
+                {now === 'ready' ? (
+                  <Button key={`chk:${r.n}`} plain onPress={() => void toggle(r.n, 'isChecked')}>
+                    {r.isChecked ? '[x]' : '[ ]'}
+                  </Button>
+                ) : (
+                  <Text dimColor>{r.isChecked ? '[x]' : '[ ]'}</Text>
+                )}
+                <Text> </Text>
+                <Button key={`row:${r.n}`} plain onPress={() => void toggle(r.n, 'isOpen')}>
+                  {r.change} <Text dimColor>{r.card}</Text>
+                </Button>
+                {outcome !== '' && <Text color={got?.result === 'ok' || got?.result === 'unchanged' ? 'success' : 'warning'}>{outcome}</Text>}
+              </Box>
+              {r.isOpen && <Text dimColor>    Beleg: {r.why}</Text>}
+              {r.isOpen && (
+                <Text dimColor>
+                  {'    '}
+                  {r.before} → {r.after}
+                </Text>
+              )}
+            </Box>
+          )
+        })}
+        {now === 'ready' && c.dropped.length > 0 && <Text dimColor>{c.dropped.length} Vorschläge verworfen: {c.dropped.slice(0, 5).join(' · ')}</Text>}
+        {now === 'ready' && (
+          <Box>
+            <Button key="apply" variant="primary" onPress={() => void applyChecked($).catch(() => undefined)}>
+              {`Übernehmen (${chosen})`}
+            </Button>
+            <Button key="none" onPress={() => void update($, rows, l => l.map(r => ({ ...r, isChecked: false })))}>
+              Alle ab
+            </Button>
+            <Button key="cancel" role="dismiss" onPress={() => void cancel($, false).catch(() => undefined)}>
+              Abbrechen
+            </Button>
+          </Box>
+        )}
+        {now === 'done' && close}
+      </Box>
+    )
+  })
+
   // The pill beside the hint line (and the pills of the mods drawn below it);
   // gone where the line has no room. The terminal's main screen gets the band.
   on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
@@ -357,7 +660,7 @@ export const register: Register = on => {
     const pill = isBusy ? (
       <Text dimColor>{PILL_BUSY}</Text>
     ) : (
-      <Button key="board" plain onPress={() => void runBoard($, e.props.isWorking).catch(() => undefined)}>
+      <Button key="board" plain onPress={() => void startFromPress($, e.props.isWorking).catch(() => undefined)}>
         <Text backgroundColor="claude" color="inverseText" bold>
           {PILL}
         </Text>
@@ -392,7 +695,7 @@ export const register: Register = on => {
         {isBusy ? (
           <Text dimColor>{PILL_BUSY}</Text>
         ) : (
-          <Button key="board" plain onPress={() => void runBoard($, e.props.isWorking).catch(() => undefined)}>
+          <Button key="board" plain onPress={() => void startFromPress($, e.props.isWorking).catch(() => undefined)}>
             <Text backgroundColor="claude" color="inverseText" bold>
               {PILL}
             </Text>

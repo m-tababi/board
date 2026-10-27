@@ -18,7 +18,6 @@ import {
   parseConfig,
   pillFits,
   reminder,
-  selectedRows,
   sha256Hex,
 } from '../hooks/board'
 import type { BucketKey, Card, Config, Pr } from '../hooks/board'
@@ -89,8 +88,9 @@ const REPLY = JSON.stringify({
 })
 
 type WorldOptions = {
-  ask?: string | 'dismiss'
   reply?: string
+  // How long the engine takes to answer: az reads, the model, apply.py (ms on the mock clock).
+  slow?: { az?: number; model?: number; apply?: number }
   surfaces?: ('terminal' | 'desktop')[]
   store?: Record<string, unknown>
   failAz?: boolean
@@ -111,7 +111,8 @@ function world(on: On, o: WorldOptions = {}) {
     files: new Map<string, string>(),
     logs: [] as string[],
     toasts: [] as string[],
-    questions: [] as string[],
+    opened: [] as string[],
+    closed: [] as string[],
     runs: [] as string[][],
     prompts: [] as { system: string; prompt: string; model: string; effort?: string; maxTokens?: number }[],
     store: { ...(o.store ?? {}) } as Record<string, unknown>,
@@ -143,6 +144,14 @@ function world(on: On, o: WorldOptions = {}) {
     if (e.text === undefined) seen.ends += 1
     return { value: undefined }
   })
+  on('ui.open', ($, e) => {
+    seen.opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', ($, e) => {
+    seen.closed.push(e.id)
+    return { value: undefined }
+  })
   on('fs.write', ($, e) => {
     seen.files.set(e.path, e.text)
     return { value: undefined }
@@ -159,11 +168,12 @@ function world(on: On, o: WorldOptions = {}) {
     const file = seen.files.get(e.path)
     return file === undefined ? { deny: `ENOENT ${e.path}` } : { value: file }
   })
-  on('process.run', ($, e) => {
+  on('process.run', async ($, e) => {
     const argv = [...e.argv]
     seen.runs.push(argv)
     const line = argv.join(' ')
     if (argv[0] === AZ) {
+      if (o.slow?.az !== undefined) await seen.clock.sleep(o.slow.az)
       if (o.failAz === true) return { value: result(1, '', 'AADSTS: login required') }
       const url = argv[argv.indexOf('--url') + 1] ?? ''
       if (url.endsWith(`/planner/plans/${PLAN_ID}/tasks`)) return { value: result(0, JSON.stringify({ value: o.tasks ?? TASKS })) }
@@ -179,23 +189,23 @@ function world(on: On, o: WorldOptions = {}) {
     if (argv[0] === '/usr/bin/rm') return { value: result(0, '') }
     if (argv[0] === PYTHON) {
       seen.confirmAtApply = seen.files.get(`${DIR}/confirm.json`)
+      if (o.slow?.apply !== undefined) await seen.clock.sleep(o.slow.apply)
       if (o.apply?.reject === true) throw new Error('timed out')
       const rows = (argv[argv.indexOf('--rows') + 1] ?? '').split(',').map(Number)
       const results = o.apply?.results ?? []
       const written = rows.map((n, i) => ({ n, result: results[i] ?? 'ok', detail: '' }))
+      // Like apply.py: one line per row in the report, then the final line.
+      const report = argv[argv.indexOf('--report') + 1] ?? ''
+      const lines = [...written.map(r => JSON.stringify(r)), JSON.stringify({ final: true, status: 'ok', reason: '', written: true })]
+      seen.files.set(report, `${lines.join('\n')}\n`)
       return { value: result(0, JSON.stringify({ status: 'ok', reason: '', written: true, rows: written })) }
     }
     return { deny: `unexpected ${line}` }
   })
-  on('model.complete', ($, e) => {
+  on('model.complete', async ($, e) => {
     seen.prompts.push({ system: String(e.system), prompt: String(e.prompt), model: e.model, effort: e.effort, maxTokens: e.maxTokens })
+    if (o.slow?.model !== undefined) await seen.clock.sleep(o.slow.model)
     return { value: { isAnswered: true, text: o.reply ?? REPLY, usage: { ...ZERO, input_tokens: 1234, output_tokens: 56 } } }
-  })
-  on('tool.call', { tool: 'AskUserQuestion' }, ($, e) => {
-    const question = e.questions[0]?.question ?? ''
-    seen.questions.push(question)
-    if (o.ask === 'dismiss') return { deny: 'dismissed' }
-    return { result: { questions: e.questions, answers: { [question]: o.ask ?? 'ja' } } as never }
   })
   on('tool.call', { tool: 'Bash' }, () => ({ result: { stdout: 'ran', stderr: '', interrupted: false } as never }))
   on('turn.start', ($, e) => ({ turnId: e.turnId }))
@@ -232,25 +242,39 @@ async function settled(seen: { clock: MockClock; ends: number }): Promise<void> 
   for (let i = 0; i < 1000 && seen.ends === 0; i += 1) await seen.clock.settle()
 }
 
+function pane($: Engine) {
+  return $.ui.mount({
+    plugin: 'board',
+    surface: 'terminal',
+    component: 'Pane',
+    requestId: 'board-update',
+    props: { title: 'Board Update', isFocused: false, bodyColumns: 80, placement: 'dock', scroll: { offset: 0, bodyRows: 40 }, view: {} },
+    viewport: { columns: 160, rows: 40, isFullscreen: true },
+  })
+}
+
+type Pane = Awaited<ReturnType<typeof pane>>
+
+// Everything the pane shows, as one text.
+async function shown(ui: Pane): Promise<string> {
+  return (await ui.findAll({ type: 'Text' })).map(t => t.text).join('\n') + '\n' + (await ui.findAll({ type: 'Button' })).map(b => b.text).join('\n')
+}
+
+// Lets the run go on until the pane shows `text`.
+async function until(seen: { clock: MockClock }, ui: Pane, text: string | RegExp): Promise<string> {
+  let now = ''
+  for (let i = 0; i < 300; i += 1) {
+    now = await shown(ui)
+    if (typeof text === 'string' ? now.includes(text) : text.test(now)) return now
+    await seen.clock.settle()
+  }
+  throw new Error(`pane never showed ${String(text)}; it shows:\n${now}`)
+}
+
 const applyRun = (runs: string[][]) => runs.find(argv => argv[0] === PYTHON)
 const stamped = '2026-10-27-140000'
 
 // ---- pure logic -----------------------------------------------------------
-
-describe('answer grammar', () => {
-  test('ja, nein and ja außer are the only answers', () => {
-    expect(selectedRows('ja', 4)).toEqual([1, 2, 3, 4])
-    expect(selectedRows(' ja ', 2)).toEqual([1, 2])
-    expect(selectedRows('ja außer 3, 1', 4)).toEqual([2, 4])
-    expect(selectedRows('ja außer 2,3', 4)).toEqual([1, 4])
-    expect(selectedRows('nein', 4)).toBeNull()
-    for (const bad of ['Ja', 'yes', 'ja bitte', 'ja außer', 'ja außer 5', 'ja außer 0', 'ja außer 1, 1', 'ja außer 1 2', 'ja; rm -rf', '']) {
-      expect(selectedRows(bad, 4)).toBeNull()
-    }
-    // Excluding every row leaves nothing to run.
-    expect(selectedRows('ja außer 1, 2', 2)).toBeNull()
-  })
-})
 
 describe('pill width', () => {
   test('fits from about 85 columns beside the other pills, gone below', () => {
@@ -557,15 +581,27 @@ describe('helpers', () => {
 
 // ---- the run through the engine ---------------------------------------------
 
-describe('a board run', () => {
-  test('the pill collects, asks, then runs apply.py with the shown file’s hash', async ($, on) => {
-    const seen = world(on, { ask: 'ja außer 2' })
+describe('a board run in the pane', () => {
+  test('the pill opens the pane: collecting, thinking, ready; Übernehmen runs apply.py with the shown file’s hash', async ($, on) => {
+    const seen = world(on, { slow: { az: 3000, model: 5000 } })
     await start($, false)
 
     const ui = await hintLine($, 120)
     expect(await ui.find({ type: 'Button', text: /▦ Board/ })).toBeDefined()
     await ui.press({ key: 'board' })
-    await settled(seen)
+    expect(seen.opened).toEqual(['board-update'])
+
+    const view = await pane($)
+    expect(await until(seen, view, 'Sammelt … 0 s')).toContain('Abbrechen')
+    await seen.clock.advance(1000)
+    await until(seen, view, 'Sammelt … 1 s')
+    await seen.clock.advance(5000)
+    const thinking = await until(seen, view, 'Opus denkt … 0 s')
+    expect(thinking).toContain('3 Karten · 2 PRs · 1 Backlog-Einträge')
+    await seen.clock.advance(2000)
+    await until(seen, view, 'Opus denkt … 2 s')
+    await seen.clock.advance(3000)
+    const ready = await until(seen, view, 'Übernehmen (3)')
 
     // Opus, medium, no tools, the rules as system prompt; the data inside <data>.
     const [sent] = seen.prompts
@@ -584,16 +620,24 @@ describe('a board run', () => {
     expect(seen.runs.some(r => r[0] === AZ && r.includes(`https://graph.microsoft.com/v1.0/planner/tasks/${T_DONE}/details`))).toBe(false)
     expect(seen.runs.some(r => r.join(' ') === '/usr/bin/gh api -H Accept: application/vnd.github.raw repos/example-org/alpha/contents/backlog.md?ref=main')).toBe(true)
 
-    // The table: three rows kept, two dropped, no escape sequence.
-    expect(seen.logs).toContain('Nr | Karte | Aktion | Beleg')
-    expect(seen.logs.some(l => l.startsWith('1 | Write Parser Docs | mir zuweisen'))).toBe(true)
-    expect(seen.logs.some(l => l.startsWith('3 | Fix Cache Race [2J | → Done'))).toBe(true)
-    expect(seen.logs.filter(l => l.startsWith('Board: verworfen'))).toHaveLength(2)
-    expect(seen.logs.join('\n')).not.toContain('\u001b')
-    expect(seen.questions).toHaveLength(1)
+    // Three rows kept, two dropped, no escape sequence; nothing in the transcript log.
+    expect((await view.find({ key: 'row:1' }))?.text).toBe('mir zuweisen Write Parser Docs')
+    expect((await view.find({ key: 'row:3' }))?.text).toBe('→ Done Fix Cache Race [2J')
+    expect(ready).toContain('2 Vorschläge verworfen')
+    expect(ready).not.toContain('\u001b')
+    expect(seen.logs).toEqual([])
 
+    // A row opens to its evidence and before -> after; unchecking changes the count.
+    await view.press({ key: 'row:3' })
+    const open = await until(seen, view, 'Beleg: PR #133')
+    expect(open).toContain('In Review → Done')
+    await view.press({ key: 'chk:2' })
+    await until(seen, view, 'Übernehmen (2)')
+
+    await view.press({ key: 'apply' })
+    await until(seen, view, 'Ausgeführt: 2 von 2 Zeilen ok.')
     const file = `${DIR}/proposals-${stamped}.json`
-    const shown = seen.files.get(file) ?? ''
+    const document = seen.files.get(file) ?? ''
     expect(applyRun(seen.runs)).toEqual([
       PYTHON,
       '-I',
@@ -603,25 +647,92 @@ describe('a board run', () => {
       '--rows',
       '1,3',
       '--sha256',
-      await sha256Hex(shown),
+      await sha256Hex(document),
       '--report',
       `${DIR}/apply-${stamped}.jsonl`,
     ])
-    expect(JSON.parse(shown).rows.map((r: { action: string }) => r.action)).toEqual(['assign', 'marker', 'move'])
+    // The one-time confirmation came before apply.py, with hash, rows and time.
+    expect(JSON.parse(seen.confirmAtApply ?? '{}')).toEqual({ sha256: await sha256Hex(document), rows: [1, 3], at: seen.clock.now() })
+    expect(JSON.parse(document).rows.map((r: { action: string }) => r.action)).toEqual(['assign', 'marker', 'move'])
     expect(seen.files.get(`${DIR}/last-run.md`)).toContain('Board: ausgeführt')
     expect(seen.store.lastRunAt).toBe(START)
     expect(seen.toasts).toContain('Board: 2 von 2 Zeilen ausgeführt.')
+
+    await view.press({ key: 'close' })
+    expect(seen.closed).toEqual(['board-update'])
   })
 
-  test('the yes writes a one-time confirmation with hash, rows and time before apply.py runs', async ($, on) => {
-    const seen = world(on, { ask: 'ja außer 2' })
+  test('the rows’ results come from apply.py’s report while it runs', async ($, on) => {
+    const seen = world(on, { slow: { apply: 5000 }, apply: { results: ['ok', 'skipped', 'ok'] } })
     await start($, false)
     await board($)
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (3)')
+
+    await view.press({ key: 'apply' })
+    await until(seen, view, 'Schreibt … 0 s')
+    // Half way, the report holds the first row.
+    seen.files.set(`${DIR}/apply-${stamped}.jsonl`, '{"n": 1, "result": "ok", "detail": ""}\n')
+    await seen.clock.advance(2000)
+    const halfway = await until(seen, view, 'Schreibt … 2 s')
+    expect(halfway).toContain('→ ok')
+    await seen.clock.advance(3000)
+    const done = await until(seen, view, 'Ausgeführt: 2 von 3 Zeilen ok.')
+    expect(done).toContain('→ übersprungen')
+  })
+
+  test('Alle ab, then Übernehmen (0): no confirmation, no apply.py, a review all the same', async ($, on) => {
+    const seen = world(on)
+    await start($, false)
+    await board($)
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (3)')
+
+    await view.press({ key: 'none' })
+    await until(seen, view, 'Übernehmen (0)')
+    await view.press({ key: 'apply' })
     await settled(seen)
 
-    const argv = applyRun(seen.runs) ?? []
-    expect(JSON.parse(seen.confirmAtApply ?? '{}')).toEqual({ sha256: argv[8], rows: [1, 3], at: START })
-    expect(argv.slice(9)).toEqual(['--report', `${DIR}/apply-${stamped}.jsonl`])
+    expect(applyRun(seen.runs)).toBeUndefined()
+    expect(seen.files.has(`${DIR}/confirm.json`)).toBe(false)
+    expect(seen.store.lastRunAt).toBe(START)
+    expect(seen.closed).toEqual(['board-update'])
+  })
+
+  test('Abbrechen while Opus thinks cuts the model call and counts as a review', async ($, on) => {
+    const seen = world(on, { slow: { model: 60_000 } })
+    await start($, false)
+    await board($)
+    const view = await pane($)
+    await until(seen, view, 'Opus denkt')
+
+    await view.press({ key: 'cancel' })
+    await settled(seen)
+    // The kit may hold the hook's answer until its sleep is over; the run ends either way.
+    await seen.clock.advance(60_000)
+    await settled(seen)
+
+    expect(seen.files.has(`${DIR}/proposals-${stamped}.json`)).toBe(false)
+    expect(applyRun(seen.runs)).toBeUndefined()
+    expect(seen.store.lastRunAt).toBe(START)
+    expect(seen.closed).toEqual(['board-update'])
+  })
+
+  test('Abbrechen with the proposals shown runs nothing and counts as a review', async ($, on) => {
+    const seen = world(on)
+    await start($, false)
+    await board($)
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (3)')
+
+    await view.press({ key: 'cancel' })
+    await settled(seen)
+
+    expect(applyRun(seen.runs)).toBeUndefined()
+    expect(seen.store.lastRunAt).toBe(START)
+    expect(seen.closed).toEqual(['board-update'])
+    // The pill is free again.
+    expect(await board($)).toBe('Board-Abgleich gestartet – Fenster „Board Update“.')
   })
 
   test('apply.py killed at the timeout: the rows it reported are shown, the run is not stamped', async ($, on) => {
@@ -629,13 +740,13 @@ describe('a board run', () => {
     const seen = world(on, { apply: { reject: true, report } })
     await start($, false)
     await board($)
-    await settled(seen)
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (3)')
+    await view.press({ key: 'apply' })
 
-    expect(seen.logs).toContain('Board: ABGEBROCHEN – apply.py ohne Abschlusszeile beendet')
-    // Row 3 never reached the report: it may have been running at the kill.
-    expect(seen.logs.some(l => l.startsWith('3 | ') && l.includes('unbekannt – auf dem Board prüfen'))).toBe(true)
-    expect(seen.logs.some(l => l.startsWith('1 | Write Parser Docs – mir zuweisen | ok'))).toBe(true)
-    expect(seen.logs.some(l => l.startsWith('2 | ') && l.includes('übersprungen'))).toBe(true)
+    const done = await until(seen, view, 'ABGEBROCHEN – apply.py ohne Abschlusszeile beendet')
+    expect(done).toContain('→ unbekannt – auf dem Board prüfen')
+    expect(done).toContain('→ übersprungen (Karte seit dem Abgleich geändert)')
     expect(seen.files.get(`${DIR}/last-run.md`)).toContain('ABGEBROCHEN')
     expect(seen.store.lastRunAt).toBeUndefined()
   })
@@ -644,7 +755,10 @@ describe('a board run', () => {
     const seen = world(on, { apply: { results: ['error', 'skipped', 'error'] } })
     await start($, false)
     await board($)
-    await settled(seen)
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (3)')
+    await view.press({ key: 'apply' })
+    await until(seen, view, 'Ausgeführt: 0 von 3 Zeilen ok.')
 
     expect(applyRun(seen.runs)).toBeDefined()
     expect(seen.store.lastRunAt).toBeUndefined()
@@ -654,10 +768,10 @@ describe('a board run', () => {
     const seen = world(on, { tasks: [] })
     await start($, false)
     await board($)
-    await settled(seen)
+    const view = await pane($)
 
+    expect(await until(seen, view, 'keine Karten gelesen')).toContain('Schließen')
     expect(seen.prompts).toEqual([])
-    expect(seen.logs.some(l => l.includes('keine Karten gelesen'))).toBe(true)
     expect(seen.store.lastRunAt).toBeUndefined()
   })
 
@@ -665,9 +779,10 @@ describe('a board run', () => {
     const seen = world(on, { tasks: [...TASKS, { id: 'bad id', title: 'x', '@odata.etag': 'W/"z"' }], reply: '{"rows":[]}' })
     await start($, false)
     await board($)
-    await settled(seen)
+    const view = await pane($)
 
-    expect(seen.logs).toContain('Board: Achtung – 1 Karte(n) unlesbar, nicht bewertet.')
+    const done = await until(seen, view, 'Keine Änderungen vorgeschlagen')
+    expect(done).toContain('Achtung – 1 Karte(n) unlesbar, nicht bewertet.')
     expect(seen.store.lastRunAt).toBeUndefined()
   })
 
@@ -675,10 +790,10 @@ describe('a board run', () => {
     const seen = world(on, { failStand: true })
     await start($, false)
     await board($)
-    await settled(seen)
+    const view = await pane($)
 
+    await until(seen, view, 'Standdatei bench.md nicht lesbar')
     expect(seen.prompts).toEqual([])
-    expect(seen.logs.some(l => l.includes('bench.md'))).toBe(true)
   })
 
   for (const config of [null, '{', JSON.stringify({ ...CONFIG_FILE, planId: 'bad id' })]) {
@@ -686,11 +801,11 @@ describe('a board run', () => {
       const seen = world(on, { config })
       await start($, false)
       await board($)
-      await settled(seen)
+      const view = await pane($)
 
+      await until(seen, view, 'Abgebrochen – Konfiguration')
       expect(seen.runs).toEqual([['/usr/bin/rm', '-f', `${DIR}/confirm.json`]])
       expect(seen.prompts).toEqual([])
-      expect(seen.logs.some(l => l.startsWith('Board: abgebrochen – Konfiguration'))).toBe(true)
     })
   }
 
@@ -699,7 +814,8 @@ describe('a board run', () => {
     await start($, false)
     await $.turn.start({ turnId: 'sub', prompt: 'x', agentId: 'a1' } as never)
     await board($)
-    await settled(seen)
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (3)')
 
     expect(seen.prompts).toHaveLength(1)
   })
@@ -708,57 +824,39 @@ describe('a board run', () => {
     const seen = world(on)
     await start($, false)
     await board($)
-    await settled(seen)
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (3)')
 
     expect(seen.runs[0]).toEqual(['/usr/bin/rm', '-f', `${DIR}/confirm.json`])
   })
 
-  test('/board runs the same path and its text carries no card contents', async ($, on) => {
+  test('/board opens the pane and its text carries no card contents', async ($, on) => {
     const seen = world(on)
     await start($, false)
 
     const text = await board($)
-    await settled(seen)
-
-    expect(text).toBe('Board-Abgleich gestartet – Tabelle und Rückfrage folgen.')
-    expect(applyRun(seen.runs)?.[6]).toBe('1,2,3')
+    expect(text).toBe('Board-Abgleich gestartet – Fenster „Board Update“.')
+    expect(seen.opened).toEqual(['board-update'])
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (3)')
+    // A second /board while the proposals wait opens the pane again, no second run.
+    expect(await board($)).toBe('Board-Abgleich läuft bereits – Fenster „Board Update“.')
+    expect(seen.prompts).toHaveLength(1)
   })
 
-  test('a deliberate „nein“ runs nothing but counts as a review', async ($, on) => {
-    const seen = world(on, { ask: 'nein' })
-    await start($, false)
-    await board($)
-    await settled(seen)
-
-    expect(applyRun(seen.runs)).toBeUndefined()
-    expect(seen.files.has(`${DIR}/confirm.json`)).toBe(false)
-    expect(seen.store.lastRunAt).toBe(START)
-  })
-
-  for (const ask of ['dismiss', 'ja außer 9', 'mach alles'] as const) {
-    test(`the answer „${ask}“ runs nothing and stamps nothing`, async ($, on) => {
-      const seen = world(on, { ask })
-      await start($, false)
-      await board($)
-      await settled(seen)
-
-      expect(seen.questions).toHaveLength(1)
-      expect(applyRun(seen.runs)).toBeUndefined()
-      expect(seen.store.lastRunAt).toBeUndefined()
-      expect(seen.files.has(`${DIR}/last-run.md`)).toBe(false)
-    })
-  }
-
-  test('without a surface (-p) the run is a dry run: table, no question answered, no apply', async ($, on) => {
-    const seen = world(on, { surfaces: [], ask: 'dismiss' })
+  test('without a surface (-p) the run is a dry run: table in the log, no pane, no apply', async ($, on) => {
+    const seen = world(on, { surfaces: [] })
     await start($, false)
 
     const text = await board($)
 
-    expect(text).toBe('Board-Abgleich: 3 Vorschläge gezeigt, keine Antwort, nichts ausgeführt.')
+    expect(text).toBe('Board-Abgleich: 3 Vorschläge gezeigt (Trockenlauf ohne Oberfläche), nichts ausgeführt.')
     expect(text).not.toContain('Parser')
     expect(applyRun(seen.runs)).toBeUndefined()
+    expect(seen.opened).toEqual([])
     expect(seen.logs).toContain('Nr | Karte | Aktion | Beleg')
+    expect(seen.logs.some(l => l.startsWith('1 | Write Parser Docs | mir zuweisen'))).toBe(true)
+    expect(seen.logs.filter(l => l.startsWith('Board: verworfen'))).toHaveLength(2)
   })
 
   test('refused while Claude works, and while a run is underway', async ($, on) => {
@@ -770,9 +868,10 @@ describe('a board run', () => {
     await busy.unmount()
 
     await $.turn.start({ turnId: 't1', prompt: 'x' } as never)
-    expect(await board($)).toBe('Board-Abgleich gestartet – Tabelle und Rückfrage folgen.')
+    expect(await board($)).toBe('Board-Abgleich nicht gestartet: Claude arbeitet gerade.')
     await seen.clock.settle()
     expect(seen.runs).toEqual([])
+    expect(seen.opened).toEqual([])
     expect(seen.toasts).toEqual(['Claude arbeitet gerade – Board-Abgleich nach der Antwort.'])
   })
 
@@ -780,19 +879,20 @@ describe('a board run', () => {
     const seen = world(on, { failAz: true })
     await start($, false)
     await board($)
-    await settled(seen)
+    const view = await pane($)
 
+    await until(seen, view, 'Abgebrochen – az: AADSTS')
     expect(seen.prompts).toEqual([])
-    expect(seen.logs.some(l => l.startsWith('Board: abgebrochen – az: AADSTS'))).toBe(true)
   })
 
-  test('an empty proposal stamps the run without asking', async ($, on) => {
+  test('an empty proposal stamps the run and shows no rows', async ($, on) => {
     const seen = world(on, { reply: '{"rows":[]}' })
     await start($, false)
     await board($)
-    await settled(seen)
+    const view = await pane($)
 
-    expect(seen.questions).toEqual([])
+    await until(seen, view, 'Keine Änderungen vorgeschlagen – Board passt zum Stand.')
+    expect(await view.find({ key: 'apply' })).toBeUndefined()
     expect(seen.store.lastRunAt).toBe(START)
   })
 })

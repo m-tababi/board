@@ -675,29 +675,61 @@ export function tableLines(rows: Row[]): string[] {
   ]
 }
 
-// ---- the answer ------------------------------------------------------------
+// ---- the pane ------------------------------------------------------------
 
-export const ANSWER_YES = 'ja'
-export const ANSWER_NO = 'nein'
+// One proposal as the pane shows it: checkbox, change, card; opened, the
+// evidence and the card's value before and after.
+export type PaneRow = { n: number; card: string; change: string; why: string; before: string; after: string; isChecked: boolean; isOpen: boolean }
 
-export function askText(count: number, file: string): string {
-  return `Board: ${count} Vorschläge (Tabelle im Verlauf, Datei ${file}). Ausführen? „ja“, „nein“ oder unter Other „ja außer 3, 7“?`
+function blockLine(description: string): string {
+  const inside = BLOCK_RE.exec(description)?.[1]
+  return inside === undefined ? '–' : clean(inside, 120)
 }
 
-/**
- * The rows to run for an answer: all for "ja", none (null) for "nein" or
- * anything that is not exactly the grammar, the rest for "ja außer n, …".
- */
-export function selectedRows(answer: string, count: number): number[] | null {
-  const text = answer.trim()
-  const all = Array.from({ length: count }, (_, i) => i + 1)
-  if (text === ANSWER_YES) return all
-  const found = /^ja außer (\d{1,3}(?:\s*,\s*\d{1,3})*)$/.exec(text)
-  if (found?.[1] === undefined) return null
-  const excluded = found[1].split(',').map(s => Number(s.trim()))
-  if (new Set(excluded).size !== excluded.length || excluded.some(n => n < 1 || n > count)) return null
-  const kept = all.filter(n => !excluded.includes(n))
-  return kept.length === 0 ? null : kept
+/** The pane's rows for the checked proposal; every row starts checked. */
+export function paneRows(rows: Row[], cards: Card[]): PaneRow[] {
+  const byId = new Map(cards.map(c => [c.id, c]))
+  return rows.map(row => {
+    const card = row.action === 'create' ? undefined : byId.get(row.taskId)
+    let before = '–'
+    let after = ''
+    switch (row.action) {
+      case 'percent':
+        before = `${card?.percent ?? '?'} %`
+        after = `${row.percent} %`
+        break
+      case 'move':
+        before = card === undefined || card.bucket === 'unknown' ? '?' : BUCKET_LABEL[card.bucket]
+        after = BUCKET_LABEL[row.bucket]
+        break
+      case 'assign':
+        before = 'frei'
+        after = 'mir zugewiesen'
+        break
+      case 'marker':
+        before = blockLine(card?.details?.description ?? '')
+        after = `STATUS …: ${markerFields(row.marker)}`
+        break
+      case 'create':
+        after = `neue Karte in ${BUCKET_LABEL[row.bucket]}`
+        break
+    }
+    return {
+      n: row.n,
+      card: clean(row.title, 70),
+      change: clean(actionLabel(row), 90),
+      why: clean(row.evidence, 300),
+      before,
+      after: clean(after, 200),
+      isChecked: true,
+      isOpen: false,
+    }
+  })
+}
+
+/** The rows checked in the pane, in their order. */
+export function checkedRows(rows: PaneRow[]): number[] {
+  return rows.filter(r => r.isChecked).map(r => r.n)
 }
 
 // ---- results and reminder ------------------------------------------------
@@ -713,7 +745,7 @@ export function outcomeFrom(stdout: string): Outcome | null {
   }
 }
 
-const RESULT_LABEL: Record<string, string> = {
+export const RESULT_LABEL: Record<string, string> = {
   ok: 'ok',
   skipped: 'übersprungen',
   unchanged: 'unverändert',
