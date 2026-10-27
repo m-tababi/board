@@ -4,7 +4,8 @@ A Claude Code plugin that keeps a Microsoft Planner board in step with your GitH
 
 - Finished work moves to Done, moved work changes columns, stale cards get a status marker.
 - New backlog entries become cards in the format of the `create-backlog` skill. Opus never invents a task: every new card belongs to exactly one entry of a backlog file.
-- The next steps named in your stand file can be pulled into the Sprint Backlog.
+- Older cards that are not in that format can be rewritten into it, so every card on the board reads the same.
+- The next steps named in your stand file can be pulled into the Sprint Backlog; a card moves to In Progress only with proof that its work runs.
 - Nothing about your board is in this repository. Plan, buckets, user id, repositories and paths live in a local config file.
 
 The pane's labels are German.
@@ -40,7 +41,9 @@ With the proposals:
         Acceptance Criteria:
         - A rerun reads pages from the cache
         - …
-2 Vorschläge verworfen: …
+2 Vorschläge verworfen:
+ ✗  neu in Backlog  Extract the Flag Helper – userStory nicht „As a developer, I want to … so that ….“
+ ✗  mir zuweisen  Fix Cache Race – Karte ist schon zugewiesen
 [ Übernehmen (3) ]  [ Alle ab ]  [ Abbrechen ]
 ```
 
@@ -109,15 +112,18 @@ Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`
 | Action | Effect on the board |
 | --- | --- |
 | `percent` | 0, 50 or 100 %. |
-| `move` | Another bucket. Into the Sprint Backlog only from Backlog, for a step named in the stand file, at most 3 per run, never assigned. |
+| `move` | Another bucket. Into the Sprint Backlog only from Backlog, for one whole line of the stand file's next-step section, at most 3 per run, never assigned. From Backlog or Sprint Backlog into In Progress only with proof that the work runs: an open PR by `ownerLogin` from the PR list, or one whole line of the stand file; the plugin checks the proof against what it read. |
 | `assign` | Assigns the owner, only on a free card in In Progress. |
 | `marker` | A block `<!-- board -->` / `STATUS <date>: <status> · PR <repo>#<nr> · ref <path:line>` / `<!-- /board -->` at the top of the description; the rest stays byte-identical. A block edited by hand, or a second one, is left alone. |
-| `create` | A new card in Backlog, unassigned, at most 5 per run, mapped as the `post-backlog` skill does: the title without the date, priority Urgent 1 / Important 3 / Medium 5 / Low 9, a description of `Priority`, user story and acceptance criteria, the tasks as checklist (at most 20, the rest under `Remaining tasks:`). A line `<!-- board-src: <file>#<hash of the heading> -->` on top names the entry; markers go below it. |
+| `create` | A new card in Backlog, unassigned, at most 15 per run, mapped as the `post-backlog` skill does: the title without the date, priority Urgent 1 / Important 3 / Medium 5 / Low 9, a description of `Priority`, user story and acceptance criteria, the tasks as checklist (at most 20, the rest under `Remaining tasks:`). A line `<!-- board-src: <file>#<hash of the heading> -->` on top names the entry; markers go below it. |
 | `source` | Puts only that `board-src` line on top of an older card that covers an entry but has none. |
+| `rewrite` | Brings an open card that is not in the skill format into it, at most 15 per run: new title and priority (task PATCH), then the post-backlog description and the tasks as checklist (details PATCH, old items removed, a tick kept where a task repeats an old item's text). Its `board-src` line and `<!-- board -->` block stay on top. Never for a card someone else holds or one tied to someone else's PR. The pane shows old against new. |
 
-Not possible: deleting cards, renaming, assigning anyone else, writing free text.
+Not possible: deleting cards, renaming outside a rewrite, assigning anyone else, writing free text.
 
-### What a new card must be
+At most 30 rows per run in all. Rows the plugin drops stay visible in the pane, greyed out with their reason.
+
+### What a new or rewritten card must be
 
 The source of truth for the format is the `create-backlog` skill itself. The plugin and the write script check what a machine can check, and drop or refuse anything else:
 
@@ -125,7 +131,9 @@ The source of truth for the format is the `create-backlog` skill itself. The plu
 - Priority one of `Urgent`, `Important`, `Medium`, `Low`.
 - User story `As a developer, I want to … so that ….`
 - 1–40 tasks of 3–100 characters, 3–5 acceptance criteria of 3–200 characters; no line breaks or control characters in any field.
-- The source heading is an entry of a backlog file that was read, not in a `DONE` section, and no open card already carries its `board-src` line; no open card has the same title (date, backticks and punctuation aside), and no card at all has the exact title.
+- No `<!--` in story, tasks or criteria.
+- For a new card: the source heading is an entry of a backlog file that was read, not in a `DONE` section, and no open card already carries its `board-src` line; no open card has the same title (date, backticks and punctuation aside), and no card at all has the exact title.
+- For a rewrite: the card is open, not yet in the format (title and description as post-backlog writes them), held by no one else, tied to no one else's PR; no other card has the new title. That the new text keeps the old card's meaning is yours to check in the pane, where old and new stand side by side.
 
 "English" is asked of the model, not checked; the text is in the pane before you take it over.
 
