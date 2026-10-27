@@ -790,16 +790,220 @@ export async function sha256Hex(text: string): Promise<string> {
   return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, '0')).join('')
 }
 
-// The mod's script by path (its folder, or a plugin cache copy under board/),
-// or apply.py run as a script by a python interpreter.
+// ---- the guard --------------------------------------------------------------
+
+// The old literal rules, kept for a command the splitter cannot read (an open quote).
 const APPLY_PATH = /board\/[^\s'"]*apply\.py/i
 const APPLY_SCRIPT = /\bpython[0-9.]*\b[^;&|]*\bapply\.py\b/i
+const SCRIPT_NAME = /^apply\.py$/i
+const PYTHON_NAME = /^(python[0-9.]*|pypy[0-9.]*)$/i
+const SHELL_NAME = /^(sh|bash|zsh|dash|ksh)$/
+// Words in front of the program that only start it: assignments, wrappers, their options and counts.
+const WRAPPERS = new Set(['env', 'sudo', 'nohup', 'exec', 'time', 'nice', 'ionice', 'timeout', 'xargs', 'command', 'builtin', 'stdbuf', 'setsid', 'uv', 'uvx', 'poetry', 'pipenv', 'pdm', 'hatch', 'run'])
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/
+const COUNT = /^\d+(\.\d+)?[smhd]?$/
+
+type Split = { commands: string[][]; nested: string[] }
+
+// The end of a $( … ) that opens before `from`; -1 when it never closes.
+function closingParen(text: string, from: number): number {
+  let depth = 1
+  for (let i = from; i < text.length; i += 1) {
+    const ch = text[i]
+    if (ch === '\\') i += 1
+    else if (ch === "'") {
+      const end = text.indexOf("'", i + 1)
+      if (end < 0) return -1
+      i = end
+    } else if (ch === '(') depth += 1
+    else if (ch === ')') {
+      depth -= 1
+      if (depth === 0) return i
+    }
+  }
+  return -1
+}
+
+// The $( … ) and ` … ` bodies inside text the shell expands (double quotes, an unquoted heredoc).
+function substitutions(text: string): string[] | null {
+  const found: string[] = []
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (ch === '\\') i += 1
+    else if (ch === '$' && text[i + 1] === '(') {
+      const end = closingParen(text, i + 2)
+      if (end < 0) return null
+      found.push(text.slice(i + 2, end))
+      i = end
+    } else if (ch === '`') {
+      const end = text.indexOf('`', i + 1)
+      if (end < 0) return null
+      found.push(text.slice(i + 1, end))
+      i = end
+    }
+  }
+  return found
+}
 
 /**
- * Commands the main model must not run: a literal call of the mod's apply.py.
- * A tripwire against accidents, not a boundary: quoting or a variable gets past
- * it; the hurdle is the one-time confirmation the mod writes after the yes.
+ * A command line as the shell would run it: its simple commands (words with
+ * quotes removed) and the texts it runs as commands of their own ($( … ),
+ * backticks). Heredoc bodies and comments are text, not commands. Null for a
+ * line it cannot read (an open quote or substitution).
+ */
+function splitCommand(line: string): Split | null {
+  const commands: string[][] = []
+  const nested: string[] = []
+  const heredocs: { word: string; isExpanded: boolean }[] = []
+  let words: string[] = []
+  let word = ''
+  let isWord = false
+  const endWord = () => {
+    if (isWord) words.push(word)
+    word = ''
+    isWord = false
+  }
+  const endCommand = () => {
+    endWord()
+    if (words.length > 0) commands.push(words)
+    words = []
+  }
+
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i] as string
+    if (ch === '\\') {
+      if (line[i + 1] !== '\n') {
+        word += line[i + 1] ?? ''
+        isWord = true
+      }
+      i += 1
+    } else if (ch === "'") {
+      const end = line.indexOf("'", i + 1)
+      if (end < 0) return null
+      word += line.slice(i + 1, end)
+      isWord = true
+      i = end
+    } else if (ch === '"') {
+      let end = i + 1
+      while (end < line.length && line[end] !== '"') end += line[end] === '\\' ? 2 : 1
+      if (end >= line.length) return null
+      const inside = line.slice(i + 1, end)
+      const subs = substitutions(inside)
+      if (subs === null) return null
+      nested.push(...subs)
+      word += inside.replace(/\\(["\\$`])/g, '$1')
+      isWord = true
+      i = end
+    } else if (ch === '$' && line[i + 1] === '(') {
+      const end = closingParen(line, i + 2)
+      if (end < 0) return null
+      nested.push(line.slice(i + 2, end))
+      word += line.slice(i, end + 1)
+      isWord = true
+      i = end
+    } else if (ch === '`') {
+      const end = line.indexOf('`', i + 1)
+      if (end < 0) return null
+      nested.push(line.slice(i + 1, end))
+      word += line.slice(i, end + 1)
+      isWord = true
+      i = end
+    } else if (ch === '#' && !isWord) {
+      while (i + 1 < line.length && line[i + 1] !== '\n') i += 1
+    } else if (ch === '<' && line.startsWith('<<', i) && !line.startsWith('<<<', i)) {
+      // A heredoc: its delimiter word now, its body after the line ends.
+      endWord()
+      i += line[i + 2] === '-' ? 3 : 2
+      while (line[i] === ' ' || line[i] === '\t') i += 1
+      const at = /^(['"]?)([^\s'"<>;&|()]+)\1/.exec(line.slice(i))
+      if (at === null) return null
+      heredocs.push({ word: at[2] as string, isExpanded: at[1] === '' })
+      i += at[0].length - 1
+    } else if (ch === '\n') {
+      endCommand()
+      // Each body runs from the line after the last to its delimiter line; `at` ends on the newline after it.
+      let at = i
+      for (const doc of heredocs.splice(0)) {
+        const lines = line.slice(at + 1).split('\n')
+        const last = lines.findIndex(l => l.trim() === doc.word)
+        const body = (last < 0 ? lines : lines.slice(0, last)).join('\n')
+        if (doc.isExpanded) {
+          const subs = substitutions(body)
+          if (subs === null) return null
+          nested.push(...subs)
+        }
+        at = last < 0 ? line.length : at + 1 + lines.slice(0, last + 1).join('\n').length
+      }
+      i = at === i ? i : at - 1
+    } else if (';&|()'.includes(ch)) {
+      endCommand()
+    } else if (ch === '<' || ch === '>') {
+      // A redirection: its target is a word of the command (python3 < apply.py runs the file).
+      endWord()
+    } else if (ch === ' ' || ch === '\t') {
+      endWord()
+    } else {
+      word += ch
+      isWord = true
+    }
+  }
+  endCommand()
+  return { commands, nested }
+}
+
+function baseName(word: string): string {
+  return word.split('/').pop() ?? word
+}
+
+// The first word that is not an option: the script an interpreter runs; null after -c or -m.
+function scriptOperand(args: string[]): { script?: string; code?: string } {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i] as string
+    if (arg === '-c') return { code: args[i + 1] ?? '' }
+    if (arg === '-m') return {}
+    // Python's options that take a value of their own.
+    if (arg === '-W' || arg === '-X') i += 1
+    else if (!arg.startsWith('-')) return { script: arg }
+  }
+  return {}
+}
+
+function runsScript(words: string[], depth: number): boolean {
+  let at = 0
+  while (at < words.length && (ASSIGNMENT.test(words[at] as string) || WRAPPERS.has(baseName(words[at] as string)) || (at > 0 && ((words[at] as string).startsWith('-') || COUNT.test(words[at] as string))))) {
+    at += 1
+  }
+  const program = baseName(words[at] ?? '')
+  const args = words.slice(at + 1)
+  if (SCRIPT_NAME.test(program)) return true
+  if (PYTHON_NAME.test(program)) {
+    const { script } = scriptOperand(args)
+    return script !== undefined && SCRIPT_NAME.test(baseName(script))
+  }
+  if (SHELL_NAME.test(program)) {
+    const { script, code } = scriptOperand(args)
+    if (code !== undefined) return callsScript(code, depth + 1)
+    return script !== undefined && SCRIPT_NAME.test(baseName(script))
+  }
+  return false
+}
+
+function callsScript(command: string, depth: number): boolean {
+  // Nesting this deep is no everyday command: refused like a call.
+  if (depth > 4) return true
+  const split = splitCommand(command)
+  if (split === null) return APPLY_PATH.test(command) || APPLY_SCRIPT.test(command)
+  return split.commands.some(words => runsScript(words, depth)) || split.nested.some(text => callsScript(text, depth + 1))
+}
+
+/**
+ * Commands the main model must not run: a call of the mod's apply.py, as the
+ * program, as the script of a python interpreter or of a shell, also inside
+ * $( … ), backticks or sh -c. Naming the file is no call: grep, cat or sed on
+ * it, a heredoc body or a commit message pass. A tripwire against accidents,
+ * not a boundary: a variable or a renamed copy gets past it; the hurdle is the
+ * one-time confirmation the mod writes after the confirmation in its window.
  */
 export function isApplyCall(command: unknown): boolean {
-  return typeof command === 'string' && (APPLY_PATH.test(command) || APPLY_SCRIPT.test(command))
+  return typeof command === 'string' && callsScript(command, 0)
 }

@@ -510,6 +510,49 @@ describe('helpers', () => {
       expect([command, isApplyCall(command)]).toEqual([command, false])
     }
   })
+
+  test('naming the script passes; calling it, in any wrapping, stays blocked', () => {
+    for (const command of [
+      'grep -n confirm /u/tester/claude-mods/board/tests/test_apply.py',
+      'grep -rn BUDGET ~/claude-mods/board/apply.py',
+      'cat ~/claude-mods/board/apply.py',
+      "sed -n '1,40p' ~/claude-mods/board/apply.py",
+      'cd ~/claude-mods/board && python3 -m pytest tests/test_apply.py',
+      'python3 -m pytest tests/',
+      "cat > /tmp/notes.md <<'EOF'\npython3 ~/claude-mods/board/apply.py --rows 1\nEOF\nls",
+      'cat <<-EOF > x.txt\n\tpython3 board/apply.py\n\tEOF',
+      'cat <<A <<B\npython3 board/apply.py\nA\npython3 board/apply.py\nB\nls',
+      'git commit -m "guard: python3 board/apply.py stays blocked"',
+      "git commit -m 'fix(guard): mentions of board/apply.py pass'",
+      'echo done # python3 board/apply.py',
+      'python3 -c "print(1)"',
+      'diff board/apply.py board-next/apply.py',
+    ]) {
+      expect([command, isApplyCall(command)]).toEqual([command, false])
+    }
+    for (const command of [
+      'bash -c "python3 ~/claude-mods/board/apply.py --rows 1"',
+      "sh -c 'cd ~/claude-mods/board && python3 apply.py'",
+      'echo $(python3 board/apply.py --rows 1)',
+      'echo `python3 board/apply.py`',
+      'echo "result: $(python3 board/apply.py)"',
+      '"/usr/bin/python3" "board/apply.py" --rows 1',
+      'env A=1 python3 board/apply.py',
+      'timeout 60 python3 apply.py --rows 1',
+      'python3 -W ignore apply.py',
+      './apply.py --rows 1',
+      '~/claude-mods/board/apply.py --rows 1',
+      'python3 < board/apply.py',
+      'uv run apply.py',
+      "cat <<'EOF'\nx\nEOF\npython3 board/apply.py",
+      'cat <<A <<B\nx\nA\ny\nB\npython3 apply.py',
+      'cat <<EOF\n$(python3 board/apply.py)\nEOF',
+      'ls; python3 apply.py',
+      'python3 "board/apply.py',
+    ]) {
+      expect([command, isApplyCall(command)]).toEqual([command, true])
+    }
+  })
 })
 
 // ---- the run through the engine ---------------------------------------------
