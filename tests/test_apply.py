@@ -775,6 +775,19 @@ class Rewrites(Base):
         out = self.run_apply(g, [row(1, "move", bucket="done")], [1])
         self.assertEqual(self.results(out), {1: "ok"})
 
+    def test_a_stop_after_the_task_half_still_reports_the_rewrite(self):
+        g = FakeGraph([self.old_card(), task(T2)])
+
+        def someone_joins(graph, t):
+            t["assignments"][OTHER] = {}
+
+        g.after_patch = someone_joins
+        out = self.run_apply(g, [rewrite(), row(2, "percent", tid=T2, percent=100)], [1, 2])
+        self.assertEqual(out["status"], "aborted")
+        self.assertEqual(self.results(out), {1: "error", 2: "not_run"})
+        self.assertIn("Titel und Priorität neu", out["rows"][0]["detail"])
+        self.assertEqual(len(g.writes), 1)
+
     def test_a_changed_card_is_skipped_whole(self):
         changed = self.old_card()
         changed["etag"] = 'W/"someone-else"'

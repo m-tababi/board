@@ -675,7 +675,14 @@ def _update(graph, group, today, note, outcome, cfg):
                     held.add(r["n"])
                 if result == "ok":
                     outcome["written"] = True
-                    _check_assignments(graph, task_id, before, "assignments" in body, cfg.owner)
+                    try:
+                        _check_assignments(graph, task_id, before, "assignments" in body, cfg.owner)
+                    except Stop:
+                        # The task half of a rewrite is written: the row says so before the run stops.
+                        for r in sent:
+                            if r["action"] == "rewrite":
+                                note(r, "error", "Titel und Priorität neu, Beschreibung und Checkliste nicht: Lauf angehalten")
+                        raise
 
     for r in marker_rows:
         if r["n"] in held:
