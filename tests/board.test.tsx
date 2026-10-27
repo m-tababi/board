@@ -788,6 +788,8 @@ describe('helpers', () => {
     }
     for (const command of [
       'python3 ~/.claude/plugins/cache/some-market/board/0.2.0/apply.py --rows 1',
+      'cat ~/claude-mods/board//apply.py',
+      'ls ~/claude-mods/board/0.2.0//apply.py',
       'cat ~/.claude/plugins/cache/some-market/board/0.2.0/apply.py',
       '{ python3 apply.py; }',
       'if true; then python3 apply.py; fi',

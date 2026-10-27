@@ -1081,8 +1081,8 @@ export async function sha256Hex(text: string): Promise<string> {
 
 // The mod's script by path: its folder board/, or a plugin cache copy under
 // board/<version>/; the last segment is apply.py itself, so board/tests/test_apply.py
-// is no hit. Or apply.py run as a script by a python interpreter.
-const APPLY_PATH = /board\/(?:[^\s'"/]+\/)*apply\.py(?![\w.])/i
+// is no hit; empty segments (board//apply.py) count. Or apply.py run as a script by a python interpreter.
+const APPLY_PATH = /board\/(?:[^\s'"/]*\/)*apply\.py(?![\w.])/i
 const APPLY_SCRIPT = /\bpython[0-9.]*\b[^;&|]*\bapply\.py\b/i
 
 /**
