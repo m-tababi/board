@@ -37,11 +37,11 @@ import {
   tableLines,
 } from './board'
 import type { Card, Config, Context, Entry, Outcome, Pr, RepoFile, Row, Sources } from './board'
-import type { BoardCounts, BoardPhase, BoardResult, BoardRow } from '../types'
+import type { BoardCounts, BoardPhase, BoardRejected, BoardResult, BoardRow } from '../types'
 
 const PANE = 'board-update'
 const PANE_TITLE = 'Board Update'
-const NO_COUNTS: BoardCounts = { cards: -1, prs: -1, backlog: -1, unreadable: 0, dropped: [], notices: [] }
+const NO_COUNTS: BoardCounts = { cards: -1, prs: -1, backlog: -1, unreadable: 0, notices: [] }
 
 const running = atom({ plugin: 'board', key: 'running' } as const, false)
 const isTurnRunning = atom({ plugin: 'board', key: 'isTurnRunning' } as const, false)
@@ -51,7 +51,8 @@ const rows = atom({ plugin: 'board', key: 'rows' } as const, [] as BoardRow[], {
 const results = atom({ plugin: 'board', key: 'results' } as const, [] as BoardResult[], { shape: 'results-1' })
 const startedAt = atom({ plugin: 'board', key: 'startedAt' } as const, 0, { shape: 'startedAt-1' })
 const tick = atom({ plugin: 'board', key: 'tick' } as const, 0, { shape: 'tick-1' })
-const counts = atom({ plugin: 'board', key: 'counts' } as const, NO_COUNTS, { shape: 'counts-2' })
+const counts = atom({ plugin: 'board', key: 'counts' } as const, NO_COUNTS, { shape: 'counts-3' })
+const rejected = atom({ plugin: 'board', key: 'rejected' } as const, [] as BoardRejected[], { shape: 'rejected-1' })
 const note = atom({ plugin: 'board', key: 'note' } as const, '', { shape: 'note-1' })
 
 const AZ_TIMEOUT_MS = 60_000
@@ -324,6 +325,7 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
   await update($, rows, () => [])
   await update($, results, () => [])
   await update($, counts, () => NO_COUNTS)
+  await update($, rejected, () => [])
   if (hasSurface) {
     await setPhase($, 'collecting')
     startTicker($)
@@ -384,7 +386,7 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
   const ctx: Context = { entries: sources.entries, keys, hasSkill: sources.skill !== null, nextSteps: sources.nextSteps }
   const checked = checkProposal(extractJson(reply.text), sources.cards, sources.prs, cfg, ctx)
   if (typeof checked === 'string') throw new Error(`Bewertung unbrauchbar: ${checked} (Rohantwort reply-${at}.txt)`)
-  await update($, counts, c => ({ ...c, dropped: checked.dropped.map(line => clean(line, 200)) }))
+  await update($, rejected, () => checked.rejected.map((x, i) => ({ ...x, i: i + 1, isOpen: false })))
   if (checked.rows.length === 0) {
     await stampReview($, isComplete, now)
     if (hasSurface) await setPhase($, 'done', 'Keine Änderungen vorgeschlagen – Board passt zum Stand.')
@@ -620,6 +622,7 @@ export const register: Register = on => {
     const clock = await read($, tick)
     const c = await read($, counts)
     const line = await read($, note)
+    const gone = await read($, rejected)
     const toggle = (n: number, field: 'isChecked' | 'isOpen') => update($, rows, l => l.map(r => (r.n === n ? { ...r, [field]: !r[field] } : r)))
     const close = (
       <Button key="close" role="dismiss" onPress={() => void cancel($, false).catch(() => undefined)}>
@@ -711,7 +714,26 @@ export const register: Register = on => {
             </Box>
           )
         })}
-        {now === 'ready' && c.dropped.length > 0 && <Text dimColor>{c.dropped.length} Vorschläge verworfen: {c.dropped.slice(0, 5).join(' · ')}</Text>}
+        {now === 'ready' && gone.length > 0 && <Text dimColor>{gone.length} Vorschläge verworfen:</Text>}
+        {now === 'ready' &&
+          gone.map(x => (
+            <Box key={`drop-${x.i}`} flexDirection="column">
+              <Box>
+                <Text dimColor> ✗  </Text>
+                <Button key={`drop:${x.i}`} plain dimColor onPress={() => void update($, rejected, l => l.map(y => (y.i === x.i ? { ...y, isOpen: !y.isOpen } : y)))}>
+                  {x.change} <Text dimColor>{x.card}</Text>
+                </Button>
+                <Text dimColor> – {x.reason}</Text>
+              </Box>
+              {x.isOpen &&
+                x.detail.map(d => (
+                  <Text dimColor>
+                    {'    '}
+                    {d}
+                  </Text>
+                ))}
+            </Box>
+          ))}
         {now === 'ready' && (
           <Box>
             <Button key="apply" variant="primary" onPress={() => void applyChecked($).catch(() => undefined)}>

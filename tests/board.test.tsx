@@ -901,6 +901,28 @@ describe('a board run in the pane', () => {
     expect(seen.closed).toEqual(['board-update'])
   })
 
+  test('dropped proposals stand greyed out with their reason, not tickable, and open to what they wanted', async ($, on) => {
+    const seen = world(on)
+    await start($, false)
+    await board($)
+    const view = await pane($)
+    const ready = await until(seen, view, 'Übernehmen (3)')
+
+    expect(ready).toContain('2 Vorschläge verworfen:')
+    expect(ready).toContain('– Aktion nicht erlaubt (delete)')
+    expect(ready).toContain('– Karte ist schon zugewiesen')
+    // Only the kept rows have a checkbox.
+    expect((await view.findAll({ type: 'Button' })).filter(b => (b.key ?? '').startsWith('chk:'))).toHaveLength(3)
+    expect((await view.find({ key: 'drop:1' }))?.text).toBe('delete Fix Cache Race [2J')
+    expect((await view.find({ key: 'drop:2' }))?.text).toBe('mir zuweisen Fix Cache Race [2J')
+    await view.press({ key: 'drop:1' })
+    await until(seen, view, 'Beleg: weg damit')
+    // Übernehmen counts and sends only the kept rows.
+    await view.press({ key: 'apply' })
+    await until(seen, view, 'Ausgeführt: 3 von 3 Zeilen ok.')
+    expect(applyRun(seen.runs)?.[6]).toBe('1,2,3')
+  })
+
   test('two presses on Übernehmen run apply.py once', async ($, on) => {
     const seen = world(on, { slow: { apply: 2000 } })
     await start($, false)

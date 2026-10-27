@@ -544,7 +544,35 @@ export type Row =
 
 export type Source = { file: string; heading: string }
 
-export type Checked = { rows: Row[]; dropped: string[] }
+// A dropped proposal as the pane shows it: what it wanted, on which card, and why not.
+export type Rejected = { change: string; card: string; reason: string; detail: string[] }
+
+export type Checked = { rows: Row[]; dropped: string[]; rejected: Rejected[] }
+
+const REJECTED_CHANGE: Record<string, string> = {
+  create: 'neu in Backlog',
+  rewrite: 'neu fassen',
+  source: 'Quelle setzen',
+  assign: 'mir zuweisen',
+  marker: 'Marker',
+}
+
+/** What a dropped model row wanted, in the pane's words; nothing of it is trusted. */
+function rejectedOf(item: Record<string, unknown> | null, byId: Map<string, Card>, reason: string): Rejected {
+  if (item === null) return { change: '?', card: '', reason, detail: [] }
+  const action = clean(item.action, 30)
+  const card = typeof item.taskId === 'string' ? clean(byId.get(item.taskId)?.title ?? item.taskId, 70) : clean(item.title, 70)
+  const change =
+    action === 'move' ? `→ ${clean(item.bucket, 20)}` : action === 'percent' ? `auf ${clean(item.percent, 5)} %` : (REJECTED_CHANGE[action] ?? action)
+  const detail: string[] = []
+  if (action === 'create' || action === 'rewrite') {
+    const count = (x: unknown) => (Array.isArray(x) ? x.length : 0)
+    detail.push(`Titel: ${clean(item.title, 100)}`, `Priority: ${clean(item.priority, 20)}`, `Story: ${clean(item.userStory, 300)}`)
+    detail.push(`${count(item.tasks)} Tasks, ${count(item.acceptanceCriteria)} Kriterien`)
+  }
+  if (item.evidence !== undefined) detail.push(`Beleg: ${clean(item.evidence, 300)}`)
+  return { change: clean(change, 60), card, reason: clean(reason, 200), detail }
+}
 
 const MODEL_KEYS: Record<Action, string[]> = {
   percent: ['action', 'taskId', 'percent', 'evidence'],
@@ -636,6 +664,12 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
   const byId = new Map(cards.map(c => [c.id, c]))
   const rows: Row[] = []
   const dropped: string[] = []
+  const rejected: Rejected[] = []
+  // A dropped row: the line for the log and the row for the pane.
+  const drop = (at: string, item: Record<string, unknown> | null, reason: string) => {
+    dropped.push(`${at}: ${reason}`)
+    rejected.push(rejectedOf(item, byId, reason))
+  }
   const fields = new Set<string>()
   const titles = new Set(cards.map(c => c.title.trim().toLowerCase()))
   const markers = new Map<string, Marker>()
@@ -649,22 +683,22 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
   for (const [i, item] of ((raw as { rows: unknown[] }).rows).entries()) {
     const at = `Vorschlag ${i + 1}`
     if (typeof item !== 'object' || item === null) {
-      dropped.push(`${at}: kein Objekt`)
+      drop(at, null, `kein Objekt`)
       continue
     }
     const r = item as Record<string, unknown>
     const action = r.action as Action
     if (!ACTIONS.includes(action)) {
-      dropped.push(`${at}: Aktion nicht erlaubt (${clean(r.action, 40)})`)
+      drop(at, r, `Aktion nicht erlaubt (${clean(r.action, 40)})`)
       continue
     }
     const extra = Object.keys(r).filter(k => !MODEL_KEYS[action].includes(k))
     if (extra.length > 0) {
-      dropped.push(`${at}: unbekannte Felder ${clean(extra.join(', '), 80)}`)
+      drop(at, r, `unbekannte Felder ${clean(extra.join(', '), 80)}`)
       continue
     }
     if (GUID_RE.test(JSON.stringify(r))) {
-      dropped.push(`${at}: enthält eine Benutzer-ID`)
+      drop(at, r, `enthält eine Benutzer-ID`)
       continue
     }
     const evidence = clean(r.evidence, 300)
@@ -672,30 +706,30 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
 
     if (action === 'create') {
       if (!ctx.hasSkill) {
-        dropped.push(`${at}: neue Karten gesperrt (Skill-Datei create-backlog nicht lesbar)`)
+        drop(at, r, `neue Karten gesperrt (Skill-Datei create-backlog nicht lesbar)`)
         continue
       }
       const wrong = cardFieldsError(r)
       if (wrong !== null) {
-        dropped.push(`${at}: ${wrong}`)
+        drop(at, r, `${wrong}`)
         continue
       }
       const title = r.title as string
       const src = sourceFrom(r.source, ctx)
       if (typeof src === 'string') {
-        dropped.push(`${at}: ${src}`)
+        drop(at, r, `${src}`)
         continue
       }
       if (sources.has(`${src.file}#${src.key}`)) {
-        dropped.push(`${at}: Quelle „${clean(src.heading, 60)}“ hat schon eine Karte`)
+        drop(at, r, `Quelle „${clean(src.heading, 60)}“ hat schon eine Karte`)
         continue
       }
       if (titles.has(title.toLowerCase()) || openTitles.has(normalTitle(title))) {
-        dropped.push(`${at}: Karte mit diesem Titel gibt es schon (Quelle per source setzen)`)
+        drop(at, r, `Karte mit diesem Titel gibt es schon (Quelle per source setzen)`)
         continue
       }
       if (creates >= MAX_CREATES) {
-        dropped.push(`${at}: mehr als ${MAX_CREATES} neue Karten`)
+        drop(at, r, `mehr als ${MAX_CREATES} neue Karten`)
         continue
       }
       creates += 1
@@ -718,56 +752,56 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
 
     const card = typeof r.taskId === 'string' ? byId.get(r.taskId) : undefined
     if (card === undefined || card.details === undefined) {
-      dropped.push(`${at}: Karte unbekannt oder in Done`)
+      drop(at, r, `Karte unbekannt oder in Done`)
       continue
     }
     if (isSkipped(card.title, cfg)) {
-      dropped.push(`${at}: Karte bleibt laut Konfiguration unberührt`)
+      drop(at, r, `Karte bleibt laut Konfiguration unberührt`)
       continue
     }
     const key = `${card.id}/${FIELD[action]}`
     if (fields.has(key)) {
-      dropped.push(`${at}: Feld ${FIELD[action]} der Karte doppelt`)
+      drop(at, r, `Feld ${FIELD[action]} der Karte doppelt`)
       continue
     }
     const base = { n, taskId: card.id, title: clean(card.title, 255), etag: card.etag, detailsEtag: card.details.etag, evidence }
     let row: Row
     if (action === 'percent') {
       if (!PERCENTS.includes(r.percent as 0)) {
-        dropped.push(`${at}: percent nur 0, 50 oder 100`)
+        drop(at, r, `percent nur 0, 50 oder 100`)
         continue
       }
       if (r.percent === card.percent) {
-        dropped.push(`${at}: Karte steht schon auf ${card.percent} %`)
+        drop(at, r, `Karte steht schon auf ${card.percent} %`)
         continue
       }
       row = { ...base, action, percent: r.percent as number }
     } else if (action === 'move') {
       if (!(typeof r.bucket === 'string' && (BUCKET_KEYS as readonly string[]).includes(r.bucket))) {
-        dropped.push(`${at}: bucket unbekannt`)
+        drop(at, r, `bucket unbekannt`)
         continue
       }
       if (r.bucket === card.bucket) {
-        dropped.push(`${at}: Karte liegt schon in dieser Spalte`)
+        drop(at, r, `Karte liegt schon in dieser Spalte`)
         continue
       }
       let why = evidence
       if (r.bucket === 'sprint_backlog') {
         // Pulled only from Backlog, only for a named next step, at most MAX_SPRINT, never assigned.
         if (ctx.nextSteps === null) {
-          dropped.push(`${at}: Sprint Backlog nur mit standFile und Abschnitt „Nächster Schritt“`)
+          drop(at, r, `Sprint Backlog nur mit standFile und Abschnitt „Nächster Schritt“`)
           continue
         }
         if (card.bucket !== 'backlog') {
-          dropped.push(`${at}: in den Sprint Backlog nur aus Backlog`)
+          drop(at, r, `in den Sprint Backlog nur aus Backlog`)
           continue
         }
         if (!isNamedStep(r.nextStep, ctx.nextSteps)) {
-          dropped.push(`${at}: nextStep steht nicht im Abschnitt „Nächster Schritt“`)
+          drop(at, r, `nextStep steht nicht im Abschnitt „Nächster Schritt“`)
           continue
         }
         if (sprints >= MAX_SPRINT) {
-          dropped.push(`${at}: mehr als ${MAX_SPRINT} Karten in den Sprint Backlog`)
+          drop(at, r, `mehr als ${MAX_SPRINT} Karten in den Sprint Backlog`)
           continue
         }
         sprints += 1
@@ -776,23 +810,23 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
       row = { ...base, evidence: why, action, bucket: r.bucket as BucketKey }
     } else if (action === 'assign') {
       if (card.assigned !== 'none') {
-        dropped.push(`${at}: Karte ist schon zugewiesen`)
+        drop(at, r, `Karte ist schon zugewiesen`)
         continue
       }
       row = { ...base, action }
       assigns.push({ row, card })
     } else if (action === 'source') {
       if (sourceOf(card.details.description) !== null) {
-        dropped.push(`${at}: Karte hat schon eine Quellzeile`)
+        drop(at, r, `Karte hat schon eine Quellzeile`)
         continue
       }
       const src = sourceFrom(r.source, ctx)
       if (typeof src === 'string') {
-        dropped.push(`${at}: ${src}`)
+        drop(at, r, `${src}`)
         continue
       }
       if (sources.has(`${src.file}#${src.key}`)) {
-        dropped.push(`${at}: Quelle „${clean(src.heading, 60)}“ hat schon eine Karte`)
+        drop(at, r, `Quelle „${clean(src.heading, 60)}“ hat schon eine Karte`)
         continue
       }
       sources.add(`${src.file}#${src.key}`)
@@ -800,18 +834,18 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
     } else {
       const m = markerFrom(r.marker, cfg)
       if (typeof m === 'string') {
-        dropped.push(`${at}: ${m}`)
+        drop(at, r, `${m}`)
         continue
       }
       if (markerIsCurrent(card.details.description, m)) {
-        dropped.push(`${at}: Markerblock sagt das schon`)
+        drop(at, r, `Markerblock sagt das schon`)
         continue
       }
       markers.set(card.id, m)
       row = { ...base, action, marker: m }
     }
     if (GUID_RE.test(JSON.stringify(row))) {
-      dropped.push(`${at}: Kartentitel enthält eine Benutzer-ID (apply.py würde die Datei ablehnen)`)
+      drop(at, r, `Kartentitel enthält eine Benutzer-ID (apply.py würde die Datei ablehnen)`)
       continue
     }
     fields.add(key)
@@ -824,22 +858,25 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
     const toProgress = rows.some(r => r.action === 'move' && hit !== undefined && r.taskId === hit.card.id && r.bucket === 'in_progress')
     const toSprint = rows.some(r => r.action === 'move' && hit !== undefined && r.taskId === hit.card.id && r.bucket === 'sprint_backlog')
     if (hit !== undefined && toSprint) {
-      dropped.push(`Zuweisung „${clean(hit.card.title, 60)}“: Karten im Sprint Backlog bleiben frei`)
+      drop(`Zuweisung „${clean(hit.card.title, 60)}“`, { action: 'assign', taskId: hit.card.id, evidence: hit.row.evidence }, 'Karten im Sprint Backlog bleiben frei')
       return false
     }
     if (hit !== undefined && hit.card.bucket !== 'in_progress' && !toProgress) {
-      dropped.push(`Zuweisung „${clean(hit.card.title, 60)}“: Karte nicht in In Progress (Backlog/Sprint bleiben frei)`)
+      drop(`Zuweisung „${clean(hit.card.title, 60)}“`, { action: 'assign', taskId: hit.card.id, evidence: hit.row.evidence }, 'Karte nicht in In Progress (Backlog/Sprint bleiben frei)')
       return false
     }
     if (hit !== undefined && foreignPr(markers.get(hit.card.id), prs, cfg)) {
-      dropped.push(`Zuweisung „${clean(hit.card.title, 60)}“: Karte gehört zu fremdem PR`)
+      drop(`Zuweisung „${clean(hit.card.title, 60)}“`, { action: 'assign', taskId: hit.card.id, evidence: hit.row.evidence }, 'Karte gehört zu fremdem PR')
       return false
     }
     return true
   })
   const limited = kept.slice(0, MAX_ROWS)
-  if (kept.length > MAX_ROWS) dropped.push(`${kept.length - MAX_ROWS} Vorschläge über der Grenze von ${MAX_ROWS}`)
-  return { rows: limited.map((row, i) => ({ ...row, n: i + 1 })), dropped }
+  if (kept.length > MAX_ROWS) {
+    dropped.push(`${kept.length - MAX_ROWS} Vorschläge über der Grenze von ${MAX_ROWS}`)
+    rejected.push({ change: '–', card: `${kept.length - MAX_ROWS} weitere Vorschläge`, reason: `über der Grenze von ${MAX_ROWS} Zeilen`, detail: [] })
+  }
+  return { rows: limited.map((row, i) => ({ ...row, n: i + 1 })), dropped, rejected }
 }
 
 /** The proposal file apply.py reads; its exact bytes are hashed. */

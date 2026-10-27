@@ -13,7 +13,10 @@ export type BoardResult = { n: number; result: string; detail: string }
 
 // What the run has read so far; -1 while not yet known.
 // notices: why creates or sprint pulls are off in this run.
-export type BoardCounts = { cards: number; prs: number; backlog: number; unreadable: number; dropped: string[]; notices: string[] }
+export type BoardCounts = { cards: number; prs: number; backlog: number; unreadable: number; notices: string[] }
+
+// A dropped proposal: greyed out in the pane, not tickable; opened, what it wanted.
+export type BoardRejected = { i: number; change: string; card: string; reason: string; detail: string[]; isOpen: boolean }
 
 declare module 'claude-code' {
   interface PluginState {
@@ -31,6 +34,7 @@ declare module 'claude-code' {
       startedAt: Shaped<number>
       tick: Shaped<number>
       counts: Shaped<BoardCounts>
+      rejected: Shaped<BoardRejected[]>
       // The phase's line: why a run failed, or what it came to.
       note: Shaped<string>
     }
