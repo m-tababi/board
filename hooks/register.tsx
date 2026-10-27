@@ -17,6 +17,7 @@ import {
   entriesOf,
   extractJson,
   isApplyCall,
+  isRunFile,
   isStamped,
   lastRunMarkdown,
   nextStepsOf,
@@ -62,6 +63,8 @@ const APPLY_TIMEOUT_MS = 330_000
 const MAX_TOKENS = 16_000
 const DETAILS_AT_ONCE = 6
 const TOAST_MS = 8000
+const RUN_FILE_REFUSAL =
+  'confirm.json und proposals-*.json in ~/.claude/board schreibt nur der board-Mod (nach dem Druck auf Übernehmen), nie ein Werkzeug.'
 const GUARD_REFUSAL =
   'apply.py schreibt aufs Planner-Board und läuft nur über den board-Mod nach Bestätigung im Fenster „Board Update“ (Knopf ▦ Board oder /board), nie per Bash.'
 
@@ -208,6 +211,15 @@ async function home($: EngineInterface): Promise<string> {
   const value = (await $.env.get('HOME'))?.replace(/\/+$/, '')
   if (value === undefined || !value.startsWith('/')) throw new Error('HOME ist nicht gesetzt oder nicht absolut')
   return value
+}
+
+// A file tool's path into the run folder, by name: confirm.json or a proposals-*.json.
+async function isRunFileFor($: EngineInterface, path: unknown): Promise<boolean> {
+  return isRunFile(path, await home($))
+}
+
+function nearRunFolder(path: unknown): boolean {
+  return typeof path === 'string' && path.includes('.claude/board')
 }
 
 function isoDate(at: number): string {
@@ -545,6 +557,18 @@ export const register: Register = on => {
   // Second net beside the deny rule: the main model never runs apply.py.
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => (isApplyCall(e.command) ? { deny: GUARD_REFUSAL } : next(e))).catch(
     ($, e, next) => (next.called ? next(e) : { deny: GUARD_REFUSAL }),
+  )
+
+  // The run files are the mod's alone: no Write, Edit or NotebookEdit of the
+  // confirmation or a proposal file. Fail-closed for paths into the run folder.
+  on('tool.call', { tool: 'Write' }, async ($, e, next) => ((await isRunFileFor($, e.file_path)) ? { deny: RUN_FILE_REFUSAL } : next(e))).catch(
+    ($, e, next) => (next.called || !nearRunFolder(e.file_path) ? next(e) : { deny: RUN_FILE_REFUSAL }),
+  )
+  on('tool.call', { tool: 'Edit' }, async ($, e, next) => ((await isRunFileFor($, e.file_path)) ? { deny: RUN_FILE_REFUSAL } : next(e))).catch(
+    ($, e, next) => (next.called || !nearRunFolder(e.file_path) ? next(e) : { deny: RUN_FILE_REFUSAL }),
+  )
+  on('tool.call', { tool: 'NotebookEdit' }, async ($, e, next) => ((await isRunFileFor($, e.notebook_path)) ? { deny: RUN_FILE_REFUSAL } : next(e))).catch(
+    ($, e, next) => (next.called || !nearRunFolder(e.notebook_path) ? next(e) : { deny: RUN_FILE_REFUSAL }),
   )
 
   on('turn.start', async ($, e, next) => {

@@ -1184,6 +1184,32 @@ describe('around the run', () => {
     expect(allowed.deny).toBeUndefined()
   })
 
+  test('no file tool writes the confirmation or a proposal file', async ($, on) => {
+    world(on)
+    on('tool.call', { tool: 'Write' }, () => ({ result: { type: 'create' } as never }))
+    on('tool.call', { tool: 'Edit' }, () => ({ result: {} as never }))
+    on('tool.call', { tool: 'NotebookEdit' }, () => ({ result: {} as never }))
+    await start($, false)
+
+    for (const file_path of [
+      `${DIR}/confirm.json`,
+      '~/.claude/board/confirm.json',
+      `${HOME}/.claude/x/../board/./proposals-2026-10-27-140000.json`,
+      `${HOME}//.claude/board/proposals-x.json`,
+    ]) {
+      const write = (await $.tool.call({ tool: 'Write', file_path, content: '{}' } as never)) as { deny?: string }
+      expect([file_path, write.deny]).toEqual([file_path, expect.stringContaining('nur der board-Mod')])
+      const edit = (await $.tool.call({ tool: 'Edit', file_path, old_string: 'a', new_string: 'b' } as never)) as { deny?: string }
+      expect(edit.deny).toContain('nur der board-Mod')
+    }
+    const notebook = (await $.tool.call({ tool: 'NotebookEdit', notebook_path: `${DIR}/proposals-1.json`, new_source: 'x' } as never)) as { deny?: string }
+    expect(notebook.deny).toContain('nur der board-Mod')
+    for (const file_path of [`${DIR}/config.json`, `${DIR}/last-run.md`, `${HOME}/notes/confirm.json`, 'confirm.json']) {
+      const write = (await $.tool.call({ tool: 'Write', file_path, content: '{}' } as never)) as { deny?: string }
+      expect([file_path, write.deny]).toEqual([file_path, undefined])
+    }
+  })
+
   test('the startup reminder toasts once when the last run is old', async ($, on) => {
     const seen = world(on, { store: { lastRunAt: START - 9 * DAY } })
     await start($)

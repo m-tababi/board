@@ -1082,3 +1082,28 @@ const APPLY_SCRIPT = /\bpython[0-9.]*\b[^;&|]*\bapply\.py\b/i
 export function isApplyCall(command: unknown): boolean {
   return typeof command === 'string' && (APPLY_PATH.test(command) || APPLY_SCRIPT.test(command))
 }
+
+// The run files the one-time confirmation rests on: the mod writes them, the main model never does.
+const RUN_FILE = /^(confirm\.json|proposals-[^/]*\.json)$/
+
+/** A path with a leading ~/, and . and .. resolved; null for a relative one. */
+export function resolvedPath(path: unknown, home: string): string | null {
+  if (typeof path !== 'string') return null
+  const full = path.startsWith('~/') ? `${home}/${path.slice(2)}` : path
+  if (!full.startsWith('/')) return null
+  const parts: string[] = []
+  for (const part of full.split('/')) {
+    if (part === '' || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return `/${parts.join('/')}`
+}
+
+/** Whether a file tool's path is the run folder's confirm.json or one of its proposals-*.json. */
+export function isRunFile(path: unknown, home: string): boolean {
+  const full = resolvedPath(path, home)
+  if (full === null) return false
+  const at = full.lastIndexOf('/')
+  return full.slice(0, at) === `${home}/.claude/board` && RUN_FILE.test(full.slice(at + 1))
+}
