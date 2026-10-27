@@ -50,6 +50,8 @@ TITLE_MARKUP_RE = re.compile(r"[`*_\[]|\]\(")
 # A heading's date prefix ("2026-10-20 — …"): post-backlog drops it from the title.
 DATE_TITLE_RE = re.compile(r"^\s*\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}\s*[—–]")
 MAX_TASKS = 40
+# New cards per run, as the mod allows.
+MAX_CREATES = 5
 MAX_CHECKLIST = 20
 SOURCE_FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}/[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$")
 AZ_TIMEOUT_S = 30
@@ -311,6 +313,8 @@ def validate(doc, cfg):
             if title.casefold() in seen_titles:
                 raise Refusal(f"Zeile {n}: Karte doppelt angelegt")
             seen_titles.add(title.casefold())
+            if len(seen_titles) > MAX_CREATES:
+                raise Refusal(f"höchstens {MAX_CREATES} neue Karten je Lauf")
             continue
 
         if allowed - set(row):

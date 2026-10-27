@@ -589,6 +589,14 @@ class NewCards(Base):
             self.assertEqual(out["status"], "aborted", bad)
             self.assertEqual(g.writes, [], bad)
 
+    def test_more_than_five_new_cards_refuse_the_file(self):
+        g = FakeGraph([task(T1)])
+        rows = [card(n=i, title=f"Cache Part {i}") for i in range(1, 7)]
+        out = self.run_apply(g, rows, [1])
+        self.assertEqual(out["status"], "aborted")
+        self.assertIn("5", out["reason"])
+        self.assertEqual(g.writes, [])
+
     def test_a_marker_keeps_the_source_line_on_top(self):
         g = FakeGraph([task(T1)])
         self.run_apply(g, [card()], [1])
