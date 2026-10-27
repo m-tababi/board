@@ -42,9 +42,19 @@ BASE_STATUSES = {
 PERCENTS = (0, 50, 100)
 MAX_ROWS = 30
 MAX_CREATE_TITLE = 70
+# A new card in the create-backlog format, mapped to Planner as post-backlog does.
+PRIORITIES = {"Urgent": 1, "Important": 3, "Medium": 5, "Low": 9}
+STORY_RE = re.compile(r"^As a developer, I want to .{5,} so that .{5,}\.$")
+# Title characters Planner or Markdown would read as markup.
+TITLE_MARKUP_RE = re.compile(r"[`*_\[]|\]\(")
+MAX_TASKS = 40
+MAX_CHECKLIST = 20
+SOURCE_FILE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,40}/[A-Za-z0-9_][A-Za-z0-9_./-]{0,199}$")
 AZ_TIMEOUT_S = 30
-# No card starts after 120 s; the slowest card (five az calls of 30 s) then ends
-# by 270 s, below the mod's kill at 330 s. Rows not started are reported as not run.
+# No card starts after 120 s; the slowest card (five az calls of 30 s: task GET,
+# PATCH, assignment check, details GET and PATCH; a new card takes the title list,
+# POST, details GET and PATCH) then ends by 270 s, below the mod's kill at 330 s.
+# Rows not started are reported as not run.
 BUDGET_S = 120
 CONFIRM_MAX_AGE_MS = 120_000
 CONFIRM_PATH = os.path.join(os.path.expanduser("~"), ".claude", "board", "confirm.json")
@@ -71,16 +81,19 @@ ACTION_KEYS = {
     "move": TASK_KEYS | {"bucket"},
     "assign": TASK_KEYS,
     "marker": TASK_KEYS | {"marker"},
-    "create": {"n", "action", "evidence", "title", "bucket", "assign", "marker"},
+    "source": TASK_KEYS | {"source"},
+    "create": {"n", "action", "evidence", "title", "priority", "userStory", "tasks", "acceptanceCriteria", "source"},
 }
 # The task field each action writes; two rows writing one field of one card are refused.
-FIELD = {"percent": "percent", "move": "bucket", "assign": "assign", "marker": "description"}
+FIELD = {"percent": "percent", "move": "bucket", "assign": "assign", "marker": "description", "source": "description"}
 
 BLOCK_OPEN = "<!-- board -->"
 BLOCK_CLOSE = "<!-- /board -->"
 # The block at the very top: its lines up to the close, then up to two line breaks.
 BLOCK_RE = re.compile(r"\A<!-- board -->\r?\n(.*?)\r?\n<!-- /board -->(?:\r?\n){0,2}", re.DOTALL)
 STATUS_LINE_RE = re.compile(r"\ASTATUS \d{4}-\d{2}-\d{2}: ([^\r\n]*)\Z")
+# The line naming a card's backlog entry, above the board block; kept as it is.
+SOURCE_LINE_RE = re.compile(r"\A<!-- board-src: [^\r\n]* -->(?:\r?\n){0,2}")
 
 
 class Refusal(Exception):
@@ -184,6 +197,68 @@ def _check_marker(marker, cfg):
         raise Refusal("marker.ref: unzulässig")
 
 
+def _check_source(source):
+    if not isinstance(source, dict) or set(source) != {"file", "heading"}:
+        raise Refusal("source: braucht genau file und heading")
+    if not isinstance(source["file"], str) or not SOURCE_FILE_RE.match(source["file"]) or ".." in source["file"]:
+        raise Refusal("source.file: unzulässig")
+    heading = _text(source["heading"], "source.heading", 300)
+    if heading != heading.strip() or not heading:
+        raise Refusal("source.heading: unzulässig")
+
+
+def _check_card(row):
+    """The create-backlog fields of a new card; anything off refuses the file."""
+    n = row["n"]
+    title = _text(row["title"], "title", MAX_CREATE_TITLE)
+    if title != title.strip() or len(title) < 3 or BLOCK_OPEN in title or "<!--" in title or TITLE_MARKUP_RE.search(title):
+        raise Refusal(f"Zeile {n}: title unzulässig (3-{MAX_CREATE_TITLE} Zeichen, kein Markdown, keine Backticks)")
+    if row["priority"] not in PRIORITIES:
+        raise Refusal(f"Zeile {n}: priority nur Urgent, Important, Medium oder Low")
+    if not STORY_RE.match(_text(row["userStory"], "userStory", 600)):
+        raise Refusal(f"Zeile {n}: userStory nicht „As a developer, I want to … so that ….“")
+    tasks, criteria = row["tasks"], row["acceptanceCriteria"]
+    if not isinstance(tasks, list) or not 1 <= len(tasks) <= MAX_TASKS:
+        raise Refusal(f"Zeile {n}: 1 bis {MAX_TASKS} tasks")
+    if not isinstance(criteria, list) or not 3 <= len(criteria) <= 5:
+        raise Refusal(f"Zeile {n}: 3 bis 5 acceptanceCriteria")
+    for item, limit in [(t, 100) for t in tasks] + [(c, 200) for c in criteria]:
+        if len(_text(item, "tasks/acceptanceCriteria", limit).strip()) < 3 or item != item.strip():
+            raise Refusal(f"Zeile {n}: Eintrag in tasks/acceptanceCriteria zu kurz oder mit Rand")
+    _check_source(row["source"])
+
+
+def source_key(heading):
+    """The short hash naming a backlog heading in the card's board-src line."""
+    return hashlib.sha256(heading.encode("utf-8")).hexdigest()[:12]
+
+
+def source_line(source):
+    return f"<!-- board-src: {source['file']}#{source_key(source['heading'])} -->"
+
+
+def card_details(row):
+    """Description and checklist of a new card, as post-backlog maps a create-backlog entry."""
+    tasks = row["tasks"]
+    lines = [source_line(row["source"]), "", f"Priority: {row['priority']}", "", row["userStory"], "", "Acceptance Criteria:"]
+    lines += [f"- {c}" for c in row["acceptanceCriteria"]]
+    if len(tasks) > MAX_CHECKLIST:
+        lines += ["", "Remaining tasks:"] + [f"- {t}" for t in tasks[MAX_CHECKLIST:]]
+    checklist = {
+        f"item-{i + 1:02d}": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": t, "isChecked": False, "orderHint": f" {chr(97 + i)}!"}
+        for i, t in enumerate(tasks[:MAX_CHECKLIST])
+    }
+    return {"description": "\n".join(lines), "checklist": checklist}
+
+
+def with_source(description, source):
+    """The description with the board-src line on top; Skip when it already has one."""
+    if SOURCE_LINE_RE.match(description):
+        raise Skip("Quellzeile schon gesetzt")
+    line = source_line(source)
+    return line + ("\n\n" + description if description else "")
+
+
 def _strings(value):
     if isinstance(value, str):
         yield value
@@ -224,18 +299,13 @@ def validate(doc, cfg):
         _text(row.get("evidence", ""), "evidence", 400)
 
         if action == "create":
-            if not set(row) >= {"title", "bucket", "assign"}:
-                raise Refusal(f"Zeile {n}: create braucht title, bucket, assign")
-            title = _text(row["title"], "title", MAX_CREATE_TITLE)
-            if title != title.strip() or len(title) < 3 or BLOCK_OPEN in title:
-                raise Refusal(f"Zeile {n}: title unzulässig")
-            if row["bucket"] not in cfg.buckets or type(row["assign"]) is not bool:
-                raise Refusal(f"Zeile {n}: bucket/assign unzulässig")
+            if set(row) != allowed:
+                raise Refusal(f"Zeile {n}: create braucht {', '.join(sorted(allowed - {'n', 'action'}))}")
+            _check_card(row)
+            title = row["title"]
             if title.casefold() in seen_titles:
                 raise Refusal(f"Zeile {n}: Karte doppelt angelegt")
             seen_titles.add(title.casefold())
-            if "marker" in row:
-                _check_marker(row["marker"], cfg)
             continue
 
         if allowed - set(row):
@@ -254,6 +324,8 @@ def validate(doc, cfg):
             raise Refusal(f"Zeile {n}: bucket unbekannt")
         if action == "marker":
             _check_marker(row["marker"], cfg)
+        if action == "source":
+            _check_source(row["source"])
         key = (row["taskId"], FIELD[action])
         if key in seen_field:
             raise Refusal(f"Zeile {n}: Feld {FIELD[action]} der Karte doppelt")
@@ -298,7 +370,15 @@ def with_marker(description, marker, today, statuses=BASE_STATUSES):
     """The description with the board block on top; None when the block already says this.
 
     Raises Skip when a block was edited by hand or another block sits below the top.
+    A board-src line on top stays where it is, the block goes below it.
     """
+    head = SOURCE_LINE_RE.match(description)
+    if head:
+        rest = with_marker(description[head.end() :], marker, today, statuses)
+        if rest is None:
+            return None
+        start = head.group(0)
+        return start + ("" if start.endswith("\n") or not rest else "\n") + rest
     line = marker_line(marker, today, statuses)
     found = BLOCK_RE.match(description)
     rest = description
@@ -453,8 +533,8 @@ def apply(
 
 def _update(graph, group, today, note, outcome, cfg):
     task_id = group[0]["taskId"]
-    task_rows = [r for r in group if r["action"] != "marker"]
-    marker_rows = [r for r in group if r["action"] == "marker"]
+    task_rows = [r for r in group if r["action"] not in ("marker", "source")]
+    marker_rows = [r for r in group if r["action"] in ("marker", "source")]
 
     if task_rows:
         try:
@@ -498,7 +578,8 @@ def _update(graph, group, today, note, outcome, cfg):
             note(r, "skipped", "Beschreibung seit dem Abgleich geändert")
             continue
         try:
-            new = with_marker(details.get("description") or "", r["marker"], today, cfg.statuses)
+            old = details.get("description") or ""
+            new = with_source(old, r["source"]) if r["action"] == "source" else with_marker(old, r["marker"], today, cfg.statuses)
         except Skip as err:
             note(r, "skipped", str(err))
             continue
@@ -538,9 +619,7 @@ def _create(graph, row, today, state, note, outcome, cfg):
         note(row, "skipped", "Karte mit diesem Titel gibt es schon")
         return
 
-    body = {"planId": cfg.plan_id, "bucketId": cfg.buckets[row["bucket"]], "title": title}
-    if row["assign"]:
-        body["assignments"] = _assignment(cfg.owner)
+    body = {"planId": cfg.plan_id, "bucketId": cfg.buckets["backlog"], "title": title, "priority": PRIORITIES[row["priority"]]}
     result, out = graph.write("post", "/planner/tasks", body)
     if result != "ok":
         note(row, "error", out)
@@ -558,19 +637,13 @@ def _create(graph, row, today, state, note, outcome, cfg):
     if not set(created.get("assignments") or {}) <= {cfg.owner}:
         note(row, "error", f"angelegt als {new_id} mit fremder Zuweisung – auf dem Board prüfen")
         raise Stop(f"Neue Karte {new_id} trägt eine fremde Zuweisung; Lauf angehalten")
-    if "marker" not in row:
-        note(row, "ok", new_id)
-        return
     try:
         details = graph.get(f"/planner/tasks/{new_id}/details")
-        new = with_marker(details.get("description") or "", row["marker"], today, cfg.statuses)
-    except (RuntimeError, ValueError, Skip) as err:
-        note(row, "error", f"angelegt als {new_id}, Beschreibung nicht gesetzt ({err})")
+    except (RuntimeError, ValueError) as err:
+        note(row, "error", f"angelegt als {new_id}, Beschreibung und Checkliste nicht gesetzt ({err})")
         return
-    result, detail = ("ok", "") if new is None else graph.write(
-        "patch", f"/planner/tasks/{new_id}/details", {"description": new}, details.get("@odata.etag")
-    )
-    note(row, "ok" if result == "ok" else "error", new_id if result == "ok" else f"angelegt als {new_id}, Beschreibung: {detail}")
+    result, detail = graph.write("patch", f"/planner/tasks/{new_id}/details", card_details(row), details.get("@odata.etag"))
+    note(row, "ok" if result == "ok" else "error", new_id if result == "ok" else f"angelegt als {new_id}, Beschreibung und Checkliste: {detail}")
 
 
 def main(argv=None):

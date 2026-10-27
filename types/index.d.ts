@@ -5,13 +5,15 @@ export type BoardFlag = boolean
 export type BoardPhase = 'idle' | 'collecting' | 'thinking' | 'ready' | 'applying' | 'done' | 'failed'
 
 // One proposal in the pane: checkbox, change, card; opened, evidence and before -> after.
-export type BoardRow = { n: number; card: string; change: string; why: string; before: string; after: string; isChecked: boolean; isOpen: boolean }
+// detail: the source entry and, for a new card, the card as it will stand.
+export type BoardRow = { n: number; card: string; change: string; why: string; before: string; after: string; detail: string[]; isChecked: boolean; isOpen: boolean }
 
 // One row's result from apply.py's report.
 export type BoardResult = { n: number; result: string; detail: string }
 
 // What the run has read so far; -1 while not yet known.
-export type BoardCounts = { cards: number; prs: number; backlog: number; unreadable: number; dropped: string[] }
+// notices: why creates or sprint pulls are off in this run.
+export type BoardCounts = { cards: number; prs: number; backlog: number; unreadable: number; dropped: string[]; notices: string[] }
 
 declare module 'claude-code' {
   interface PluginState {

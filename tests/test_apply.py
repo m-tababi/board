@@ -91,6 +91,7 @@ class FakeGraph:
                 "etag": self.etag("task"),
                 "description": "",
                 "detailsEtag": self.etag("details"),
+                "checklist": {},
             }
             return 0, json.dumps(self.task_view(self.tasks[new_id])), ""
         task = self.tasks.get(parts[2])
@@ -113,6 +114,7 @@ class FakeGraph:
             self.writes.append(("patch-details" if is_details else "patch-task", parts[2], body))
             if is_details:
                 task["description"] = body["description"]
+                task["checklist"] = body.get("checklist", task.get("checklist", {}))
                 task["detailsEtag"] = self.etag("details")
             else:
                 if "percentComplete" in body:
@@ -161,6 +163,26 @@ def row(n, action, tid=T1, **extra):
 
 
 MARKER = {"status": "in_review", "repo": "alpha", "pr": 133, "ref": "backlog.md:273"}
+SOURCE = {"file": "alpha/backlog.md", "heading": "2026-10-20 — Cache the Parsed Pages"}
+STORY = "As a developer, I want to cache the parsed pages so that a rerun skips the parser."
+CRITERIA = ["A rerun reads pages from the cache", "A changed input invalidates its entry", "The cache folder is documented"]
+
+
+def card(n=1, **extra):
+    """A new card in the create-backlog format."""
+    value = {
+        "n": n,
+        "action": "create",
+        "evidence": "alpha/backlog.md:40",
+        "title": "Cache the Parsed Pages",
+        "priority": "Important",
+        "userStory": STORY,
+        "tasks": ["Add a cache folder per input", "Key entries by the input hash"],
+        "acceptanceCriteria": list(CRITERIA),
+        "source": dict(SOURCE),
+    }
+    value.update(extra)
+    return value
 
 
 class Base(unittest.TestCase):
@@ -260,9 +282,9 @@ class Refusals(Base):
             row(1, "marker", marker={**MARKER, "ref": "see $(id)"}),
             row(1, "marker", marker={**MARKER, "pr": "133"}),
             row(1, "marker", marker={**MARKER, "note": "x"}),
-            row(1, "create", title="Bad\x1b[31m title", bucket="backlog", assign=False),
-            row(1, "create", title="x" * 71, bucket="backlog", assign=False),
-            row(1, "create", title=" Padded title", bucket="backlog", assign=False),
+            card(title="Bad\x1b[31m title"),
+            card(title="x" * 71),
+            card(title=" Padded title"),
         ]
         for bad in cases:
             g = FakeGraph([task(T1)])
@@ -270,7 +292,7 @@ class Refusals(Base):
             self.assertRefusedUnwritten(out, g, "")
 
     def test_values_of_the_wrong_type_are_refused_not_crashed(self):
-        for bad in (row(1, "move", bucket=["done"]), row(1, "marker", marker={"status": ["x"]}), row(1, "create", title="Card", bucket={}, assign=False)):
+        for bad in (row(1, "move", bucket=["done"]), row(1, "marker", marker={"status": ["x"]}), card(priority=["Low"]), card(tasks="one task")):
             g = FakeGraph([task(T1)])
             out = self.run_apply(g, [bad], [1])
             self.assertRefusedUnwritten(out, g, "")
@@ -401,24 +423,17 @@ class Writes(Base):
         self.run_apply(g, [row(1, "marker", marker={"status": "side_project"})], [1])
         self.assertEqual(g.tasks[T1]["description"], "<!-- board -->\nSTATUS 2026-10-27: side project\n<!-- /board -->")
 
-    def test_titles_with_backticks_stay_verbatim_and_reach_az_as_one_argument(self):
-        title = "Fix `rm -rf` and $(whoami) in \"quotes\""
+    def test_backticks_and_quotes_in_a_task_stay_verbatim_and_reach_az_as_one_argument(self):
+        task_text = "Fix `rm -rf` and $(whoami) in \"quotes\""
         g = FakeGraph([task(T1)])
-        rows = [row(1, "create", title=title, bucket="backlog", assign=True, marker=MARKER)]
-        out = self.run_apply(g, rows, [1])
+        out = self.run_apply(g, [card(tasks=[task_text])], [1])
         self.assertEqual(self.results(out), {1: "ok"})
-        kind, body = g.writes[0]
-        self.assertEqual((kind, body["title"]), ("post", title))
-        self.assertEqual(body["planId"], PLAN)
-        self.assertEqual(list(body["assignments"]), [ME])
-        post = next(c for c in g.calls if "post" in c)
-        self.assertEqual(json.loads(post[post.index("--body") + 1])["title"], title)
-        created = next(t for t in g.tasks.values() if t["id"] != T1)
-        self.assertTrue(created["description"].startswith("<!-- board -->\nSTATUS 2026-10-27: in review"))
+        patch = next(c for c in g.calls if "patch" in c)
+        self.assertEqual(json.loads(patch[patch.index("--body") + 1])["checklist"]["item-01"]["title"], task_text)
 
     def test_create_skips_a_title_that_exists(self):
         g = FakeGraph([task(T1, title="Same Title")])
-        out = self.run_apply(g, [row(1, "create", title="same title", bucket="backlog", assign=False)], [1])
+        out = self.run_apply(g, [card(title="same title")], [1])
         self.assertEqual(self.results(out), {1: "skipped"})
         self.assertEqual(g.writes, [])
 
@@ -476,10 +491,136 @@ class Configuration(Base):
         other = {k: f"{v[:-1]}9" for k, v in BUCKETS.items()}
         self.write_config(config(planId="PlanFake0000000000000009", buckets=other))
         g = FakeGraph([task(T1)])
-        out = self.run_apply(g, [row(1, "create", title="New Card", bucket="done", assign=True)], [1], planId="PlanFake0000000000000009")
+        out = self.run_apply(g, [card()], [1], planId="PlanFake0000000000000009")
         self.assertEqual(self.results(out), {1: "ok"})
-        [(kind, body)] = g.writes
-        self.assertEqual((body["planId"], body["bucketId"], list(body["assignments"])), ("PlanFake0000000000000009", other["done"], [ME]))
+        (kind, body) = g.writes[0]
+        self.assertEqual((body["planId"], body["bucketId"]), ("PlanFake0000000000000009", other["backlog"]))
+        g = FakeGraph([task(T1, bucket="in_progress")])
+        g.tasks[T1]["bucketId"] = other["in_progress"]
+        self.run_apply(g, [row(1, "move", bucket="done"), row(2, "assign")], [1, 2], planId="PlanFake0000000000000009")
+        [(kind, tid, body)] = g.writes
+        self.assertEqual((body["bucketId"], list(body["assignments"])), (other["done"], [ME]))
+
+
+class NewCards(Base):
+    """A create row is a create-backlog entry; apply.py maps it to Planner as post-backlog does."""
+
+    def test_a_valid_card_goes_out_exactly_as_post_backlog_writes_it(self):
+        g = FakeGraph([task(T1)])
+        out = self.run_apply(g, [card()], [1])
+        self.assertEqual(out["status"], "ok")
+        [(kind, body), (patch_kind, new_id, details)] = g.writes
+        self.assertEqual((kind, body), ("post", {"planId": PLAN, "bucketId": BUCKETS["backlog"], "title": "Cache the Parsed Pages", "priority": 3}))
+        self.assertEqual(patch_kind, "patch-details")
+        self.assertEqual(self.results(out), {1: "ok"})
+        self.assertEqual(out["rows"][0]["detail"], new_id)
+        key = hashlib.sha256(SOURCE["heading"].encode("utf-8")).hexdigest()[:12]
+        self.assertEqual(
+            details["description"],
+            f"<!-- board-src: alpha/backlog.md#{key} -->\n\n"
+            "Priority: Important\n\n"
+            f"{STORY}\n\n"
+            "Acceptance Criteria:\n- A rerun reads pages from the cache\n- A changed input invalidates its entry\n- The cache folder is documented",
+        )
+        self.assertEqual(
+            details["checklist"],
+            {
+                "item-01": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": "Add a cache folder per input", "isChecked": False, "orderHint": " a!"},
+                "item-02": {"@odata.type": "#microsoft.graph.plannerChecklistItem", "title": "Key entries by the input hash", "isChecked": False, "orderHint": " b!"},
+            },
+        )
+        # The fake takes a details PATCH only with the new card's details etag; no assignment.
+        self.assertEqual(g.tasks[new_id]["assignments"], {})
+
+    def test_the_source_key_matches_the_mod(self):
+        # The same literal sits in tests/board.test.tsx.
+        self.assertEqual(apply.source_key(SOURCE["heading"]), "1edc5164ebbd")
+
+    def test_the_four_priorities_map_to_planner_numbers(self):
+        for label, number in (("Urgent", 1), ("Important", 3), ("Medium", 5), ("Low", 9)):
+            g = FakeGraph([task(T1)])
+            self.run_apply(g, [card(priority=label)], [1])
+            self.assertEqual(g.writes[0][1]["priority"], number)
+
+    def test_more_than_twenty_tasks_go_twenty_to_the_checklist_and_the_rest_below_the_description(self):
+        tasks = [f"Task number {i}" for i in range(1, 26)]
+        g = FakeGraph([task(T1)])
+        out = self.run_apply(g, [card(tasks=tasks)], [1])
+        self.assertEqual(self.results(out), {1: "ok"})
+        details = g.writes[1][2]
+        self.assertEqual([v["title"] for v in details["checklist"].values()], tasks[:20])
+        self.assertEqual(list(details["checklist"])[-1], "item-20")
+        self.assertEqual([v["orderHint"] for v in details["checklist"].values()][-1], " t!")
+        self.assertTrue(details["description"].endswith("\n\nRemaining tasks:\n- Task number 21\n- Task number 22\n- Task number 23\n- Task number 24\n- Task number 25"))
+
+    def test_a_card_off_the_format_refuses_the_file(self):
+        cases = [
+            card(priority="Must"),
+            card(priority="important"),
+            card(userStory="As a developer, I want the cache so that reruns are fast."),
+            card(userStory="As a developer, I want to cache the parsed pages."),
+            card(userStory="As an operator, I want to cache the parsed pages so that reruns are fast."),
+            card(userStory="As a developer, I want to cache the parsed pages so that reruns are fast"),
+            card(userStory="As a developer, I want to cache pages\nso that reruns are fast."),
+            card(acceptanceCriteria=CRITERIA[:2]),
+            card(acceptanceCriteria=CRITERIA + ["Fourth criterion", "Fifth criterion", "Sixth criterion"]),
+            card(tasks=[]),
+            card(tasks=[f"Task {i:03d}" for i in range(41)]),
+            card(tasks=["x" * 101]),
+            card(tasks=["ok task", "line\nbreak"]),
+            card(tasks=["ab"]),
+            card(title="Cache the `parsed` Pages"),
+            card(title="Cache the *Parsed* Pages"),
+            card(title="Cache [the](x) Pages"),
+            card(title="Cache_the_Pages"),
+            card(source={"file": "alpha/backlog.md"}),
+            card(source={"file": "../backlog.md", "heading": "x"}),
+            card(source={"file": "alpha/backlog.md", "heading": "two\nlines"}),
+            {**card(), "bucket": "backlog"},
+            {k: v for k, v in card().items() if k != "priority"},
+        ]
+        for bad in cases:
+            g = FakeGraph([task(T1)])
+            out = self.run_apply(g, [bad], [1])
+            self.assertEqual(out["status"], "aborted", bad)
+            self.assertEqual(g.writes, [], bad)
+
+    def test_a_marker_keeps_the_source_line_on_top(self):
+        g = FakeGraph([task(T1)])
+        self.run_apply(g, [card()], [1])
+        new_id = next(t for t in g.tasks if t != T1)
+        first = g.tasks[new_id]["description"]
+        source = first.split("\n", 1)[0]
+        etag = g.tasks[new_id]["detailsEtag"]
+        out = self.run_apply(g, [row(1, "marker", tid=new_id, marker=MARKER, etag=g.tasks[new_id]["etag"], detailsEtag=etag)], [1])
+        self.assertEqual(self.results(out), {1: "ok"})
+        marked = g.tasks[new_id]["description"]
+        self.assertEqual(
+            marked,
+            source + "\n\n<!-- board -->\nSTATUS 2026-10-27: in review · PR alpha#133 · ref backlog.md:273\n<!-- /board -->\n\n" + first.split("\n\n", 1)[1],
+        )
+        # The same marker again: nothing to change.
+        again = row(1, "marker", tid=new_id, marker=MARKER, etag=g.tasks[new_id]["etag"], detailsEtag=g.tasks[new_id]["detailsEtag"])
+        self.assertEqual(self.results(self.run_apply(g, [again], [1])), {1: "unchanged"})
+
+    def test_source_sets_only_the_source_line_of_an_old_card(self):
+        old = "Old text\r\nwith `code` and <!-- board -->\nSTATUS 2026-01-01: open\n<!-- /board -->"
+        g = FakeGraph([task(T1, description=old)])
+        out = self.run_apply(g, [row(1, "source", source=SOURCE)], [1])
+        self.assertEqual(self.results(out), {1: "ok"})
+        key = hashlib.sha256(SOURCE["heading"].encode("utf-8")).hexdigest()[:12]
+        self.assertEqual(g.tasks[T1]["description"], f"<!-- board-src: alpha/backlog.md#{key} -->\n\n" + old)
+        [(kind, tid, body)] = g.writes
+        self.assertEqual((kind, list(body)), ("patch-details", ["description"]))
+        # A card that has its line keeps it.
+        again = row(1, "source", source={**SOURCE, "heading": "Another Heading"}, detailsEtag=g.tasks[T1]["detailsEtag"])
+        self.assertEqual(self.results(self.run_apply(g, [again], [1])), {1: "skipped"})
+
+    def test_source_and_marker_on_one_card_are_refused(self):
+        g = FakeGraph([task(T1)])
+        out = self.run_apply(g, [row(1, "source", source=SOURCE), row(2, "marker", marker=MARKER)], [1, 2])
+        self.assertEqual(out["status"], "aborted")
+        self.assertIn("doppelt", out["reason"])
 
 
 class Confirmation(Base):
@@ -651,7 +792,7 @@ class PartialRuns(Base):
                     return 0, json.dumps(answer), ""
                 return g(argv)
 
-            rows = [row(1, "create", title="New Card", bucket="backlog", assign=False), row(2, "percent", percent=100)]
+            rows = [card(), row(2, "percent", percent=100)]
             path, digest = self.write(rows)
             self.confirm(digest, [1, 2])
             out = apply.apply(path, [1, 2], digest, call=posting, today=TODAY, confirm_path=self.confirm_path, config_path=self.config_path)

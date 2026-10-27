@@ -15,12 +15,16 @@ import {
   isApplyCall,
   markerFields,
   markerIsCurrent,
+  entriesOf,
+  nextStepsOf,
+  normalTitle,
   parseConfig,
+  sourceKey,
   pillFits,
   reminder,
   sha256Hex,
 } from '../hooks/board'
-import type { BucketKey, Card, Config, Pr } from '../hooks/board'
+import type { BucketKey, Card, Config, Context, Pr } from '../hooks/board'
 
 // Made-up values only: no real plan, bucket, user id or path belongs in a test.
 const HOME = '/u/tester'
@@ -49,11 +53,54 @@ const CONFIG_FILE = {
   backlogSources: [{ repo: 'alpha', path: 'backlog.md', ref: 'main' }],
   changelog: { repo: 'alpha', path: 'CHANGELOG.md', ref: 'main' },
   statusFiles: ['~/notes/status.md', '/srv/notes/bench.md'],
+  standFile: '~/notes/status.md',
   skipTitlePrefixes: ['Side:'],
   promptRules: ['Cards about the side project get nothing.'],
   extraStatuses: ['side_project'],
 }
 const CFG = parseConfig(JSON.stringify(CONFIG_FILE)) as Config
+
+// A backlog file in the create-backlog format, and a card for one of its entries.
+const BACKLOG = [
+  '# Backlog',
+  '',
+  '## 2026-10-20 — Cache the Parsed Pages',
+  '',
+  '**Priority:** Important',
+  '',
+  'A rerun should skip the parser.',
+  '',
+  '## 2026-10-01 — Old Exporter ✅ DONE',
+  '',
+  'Shipped.',
+  '',
+  '## 2026-10-21 — Tidy the Docs Folder',
+  '',
+  'Docs are scattered.',
+  '',
+].join('\n')
+const CACHE = '2026-10-20 — Cache the Parsed Pages'
+const STORY = 'As a developer, I want to cache the parsed pages so that a rerun skips the parser.'
+const CRITERIA = ['A rerun reads pages from the cache', 'A changed input invalidates its entry', 'The cache folder is documented']
+const create = (extra: Record<string, unknown> = {}) => ({
+  action: 'create',
+  title: 'Cache the Parsed Pages',
+  priority: 'Important',
+  userStory: STORY,
+  tasks: ['Add a cache folder per input', 'Key entries by the input hash'],
+  acceptanceCriteria: [...CRITERIA],
+  source: { file: 'alpha/backlog.md', heading: CACHE },
+  evidence: 'alpha/backlog.md:3',
+  ...extra,
+})
+const NO_CONTEXT: Context = { entries: [], keys: new Map(), hasSkill: true, nextSteps: null }
+
+async function contextFor(text: string, extra: Partial<Context> = {}): Promise<Context> {
+  const entries = entriesOf('alpha/backlog.md', text)
+  const keys = new Map<string, string>()
+  for (const e of entries) keys.set(e.heading, await sourceKey(e.heading))
+  return { entries, keys, hasSkill: true, nextSteps: null, ...extra }
+}
 
 const T_OPEN = 'TaskOpen0000000000000001'
 const T_REVIEW = 'TaskReview00000000000001'
@@ -96,6 +143,8 @@ type WorldOptions = {
   failAz?: boolean
   tasks?: unknown[]
   failStand?: boolean
+  noSkill?: boolean
+  backlog?: string
   // The config file's text; null: there is none.
   config?: string | null
   // What apply.py does: its stdout, or a rejection (killed at the timeout) with the report it left.
@@ -162,7 +211,10 @@ function world(on: On, o: WorldOptions = {}) {
       return text === null ? { deny: `ENOENT ${e.path}` } : { value: text }
     }
     if (e.path === `${HOME}/notes/status.md` || e.path === '/srv/notes/bench.md') {
-      return o.failStand === true && e.path.endsWith('/bench.md') ? { deny: `ENOENT ${e.path}` } : { value: '# Stand' }
+      return o.failStand === true && e.path.endsWith('/bench.md') ? { deny: `ENOENT ${e.path}` } : { value: '# Stand\n\n## Nächster Schritt\nWrite the parser docs next.\n' }
+    }
+    if (e.path === `${HOME}/.claude/skills/create-backlog/SKILL.md`) {
+      return o.noSkill === true ? { deny: `ENOENT ${e.path}` } : { value: '# Create Backlog\nSKILL BODY verbatim' }
     }
     if (e.path.endsWith('.jsonl') && o.apply?.report !== undefined) return { value: o.apply.report }
     const file = seen.files.get(e.path)
@@ -184,7 +236,7 @@ function world(on: On, o: WorldOptions = {}) {
       return { value: result(0, JSON.stringify(line.includes('example-org/alpha') ? PRS : [])) }
     }
     if (argv[0] === GH && argv[1] === 'api') {
-      return { value: result(0, line.includes('backlog.md') ? '# Backlog\n## Open item\ntext\n' : '# Changelog\n## [Unreleased]\n- x\n') }
+      return { value: result(0, line.includes('backlog.md') ? (o.backlog ?? '# Backlog\n## Open item\ntext\n') : '# Changelog\n## [Unreleased]\n- x\n') }
     }
     if (argv[0] === '/usr/bin/rm') return { value: result(0, '') }
     if (argv[0] === PYTHON) {
@@ -297,8 +349,8 @@ describe('proposal check', () => {
     { repo: 'alpha', number: 133, title: 't', author: 'someone', state: 'OPEN', isDraft: false, mergedAt: null, updatedAt: '', branch: '' },
     { repo: 'alpha', number: 174, title: 't', author: 'owner-login', state: 'MERGED', isDraft: false, mergedAt: 'x', updatedAt: '', branch: '' },
   ]
-  const check = (rows: unknown[]) => {
-    const checked = checkProposal({ rows }, cards, prs, CFG)
+  const check = (rows: unknown[], ctx: Context = NO_CONTEXT, on: Card[] = cards) => {
+    const checked = checkProposal({ rows }, on, prs, CFG, ctx)
     if (typeof checked === 'string') throw new Error(checked)
     return checked
   }
@@ -336,23 +388,30 @@ describe('proposal check', () => {
     expect(rows).toHaveLength(1)
     expect(dropped[0]).toContain('doppelt')
 
-    const many = Array.from({ length: MAX_ROWS + 5 }, (_, i) => ({ action: 'create', title: `New Card ${i}`, bucket: 'backlog', assign: false }))
-    const capped = check(many)
+    const lots: Card[] = Array.from({ length: MAX_ROWS + 5 }, (_, i) => ({
+      id: `M${i}`,
+      title: `Card ${i}`,
+      bucket: 'backlog',
+      percent: 0,
+      assigned: 'none',
+      etag: 'W/"m"',
+      details: { etag: 'W/"md"', description: '', checklist: [] },
+    }))
+    const many = lots.map(c => ({ action: 'percent', taskId: c.id, percent: 50 }))
+    const capped = check(many, NO_CONTEXT, lots)
     expect(capped.rows).toHaveLength(MAX_ROWS)
     expect(capped.rows.at(-1)?.n).toBe(MAX_ROWS)
     expect(capped.dropped).toEqual([`5 Vorschläge über der Grenze von ${MAX_ROWS}`])
   })
 
-  test('no assignment to a card or a new card tied to someone else’s PR', () => {
+  test('no assignment to a card tied to someone else’s PR', () => {
     const { rows, dropped } = check([
       { action: 'assign', taskId: 'A1' },
       { action: 'marker', taskId: 'A1', marker: { status: 'in_review', repo: 'alpha', pr: 133 } },
-      { action: 'create', title: 'Their Work', bucket: 'in_progress', assign: true, marker: { status: 'in_review', repo: 'alpha', pr: 133 } },
-      { action: 'create', title: 'My Work', bucket: 'in_progress', assign: true, marker: { status: 'in_review', repo: 'alpha', pr: 174 } },
     ])
-    expect(rows.map(r => r.action)).toEqual(['marker', 'create'])
-    expect(rows.map(r => r.n)).toEqual([1, 2])
-    expect(dropped).toHaveLength(2)
+    expect(rows.map(r => r.action)).toEqual(['marker'])
+    expect(rows.map(r => r.n)).toEqual([1])
+    expect(dropped).toHaveLength(1)
   })
 
   test('drops what is already so: same percent, same bucket, a block that says it', () => {
@@ -371,6 +430,7 @@ describe('proposal check', () => {
       held,
       prs,
       CFG,
+      NO_CONTEXT,
     )
     if (typeof checked === 'string') throw new Error(checked)
     expect(checked.rows).toEqual([])
@@ -379,6 +439,8 @@ describe('proposal check', () => {
     expect(markerIsCurrent('<!-- board -->\nSTATUS 2026-01-01: open\n<!-- /board -->\nText', { status: 'open' })).toBe(true)
     // Another status is a change.
     expect(markerIsCurrent(block, { status: 'done', repo: 'alpha', pr: 133 })).toBe(false)
+    // A board-src line on top is read past, as apply.py does.
+    expect(markerIsCurrent('<!-- board-src: alpha/backlog.md#0123456789ab -->\n\n<!-- board -->\nSTATUS 2026-01-01: open\n<!-- /board -->\n\nText', { status: 'open' })).toBe(true)
   })
 
   test('the block text matches what apply.py writes', () => {
@@ -389,12 +451,12 @@ describe('proposal check', () => {
     expect(markerFields({ status: 'side_project' })).toBe('side project')
   })
 
-  test('a new title is at most 70 characters, so the table shows all of it', () => {
-    const long = 'A'.repeat(71)
-    const { rows, dropped } = check([
-      { action: 'create', title: long, bucket: 'backlog', assign: false },
-      { action: 'create', title: 'B'.repeat(70), bucket: 'backlog', assign: false },
-    ])
+  test('a new title is at most 70 characters, so the table shows all of it', async () => {
+    const ctx = await contextFor(BACKLOG)
+    const { rows, dropped } = check(
+      [create({ title: 'A'.repeat(71) }), create({ title: 'B'.repeat(70) })],
+      ctx,
+    )
     expect(rows.map(r => r.title)).toEqual(['B'.repeat(70)])
     expect(dropped).toHaveLength(1)
   })
@@ -416,12 +478,13 @@ describe('proposal check', () => {
       more,
       prs,
       CFG,
+      NO_CONTEXT,
     )
     if (typeof checked === 'string') throw new Error(checked)
     expect(checked.rows.map(r => ('taskId' in r ? r.taskId : ''))).toEqual(['A1'])
     expect(checked.dropped).toHaveLength(2)
 
-    const moved = checkProposal({ rows: [{ action: 'move', taskId: 'E5', bucket: 'in_progress' }, { action: 'assign', taskId: 'E5' }] }, more, prs, CFG)
+    const moved = checkProposal({ rows: [{ action: 'move', taskId: 'E5', bucket: 'in_progress' }, { action: 'assign', taskId: 'E5' }] }, more, prs, CFG, NO_CONTEXT)
     if (typeof moved === 'string') throw new Error(moved)
     expect(moved.rows.map(r => r.action)).toEqual(['move', 'assign'])
   })
@@ -430,7 +493,7 @@ describe('proposal check', () => {
     expect(extractJson('```json\n{"rows":[]}\n```')).toEqual({ rows: [] })
     expect(extractJson('Here: {"rows":[]} done')).toEqual({ rows: [] })
     expect(extractJson('no json')).toBeNull()
-    expect(checkProposal(null, cards, prs, CFG)).toBe('Antwort ist kein Objekt mit "rows"')
+    expect(checkProposal(null, cards, prs, CFG, NO_CONTEXT)).toBe('Antwort ist kein Objekt mit "rows"')
   })
 
   test('statuses, repos and skipped cards follow the config', () => {
@@ -450,10 +513,180 @@ describe('proposal check', () => {
       side,
       prs,
       CFG,
+      NO_CONTEXT,
     )
     if (typeof checked === 'string') throw new Error(checked)
     expect(checked.rows.map(r => r.action)).toEqual(['marker'])
     expect(checked.dropped).toHaveLength(3)
+  })
+})
+
+describe('new cards in the create-backlog format', () => {
+  const cards: Card[] = [
+    { id: 'A1', title: 'Open', bucket: 'in_progress', percent: 0, assigned: 'none', etag: 'W/"a"', details: { etag: 'W/"ad"', description: '', checklist: [] } },
+  ]
+  const check = (rows: unknown[], ctx: Context, on: Card[] = cards) => {
+    const checked = checkProposal({ rows }, on, [], CFG, ctx)
+    if (typeof checked === 'string') throw new Error(checked)
+    return checked
+  }
+
+  test('the source key is the one apply.py computes', async () => {
+    // The same literal sits in tests/test_apply.py.
+    expect(await sourceKey(CACHE)).toBe('1edc5164ebbd')
+  })
+
+  test('a valid card keeps its fields and names its source entry', async () => {
+    const { rows, dropped } = check([create()], await contextFor(BACKLOG))
+    expect(dropped).toEqual([])
+    expect(rows).toEqual([
+      {
+        n: 1,
+        action: 'create',
+        title: 'Cache the Parsed Pages',
+        priority: 'Important',
+        userStory: STORY,
+        tasks: ['Add a cache folder per input', 'Key entries by the input hash'],
+        acceptanceCriteria: CRITERIA,
+        source: { file: 'alpha/backlog.md', heading: CACHE },
+        evidence: 'alpha/backlog.md:3',
+      },
+    ])
+    // Twenty-five tasks pass; apply.py puts the last five below the description.
+    const many = check([create({ tasks: Array.from({ length: 25 }, (_, i) => `Task number ${i + 1}`) })], await contextFor(BACKLOG))
+    expect(many.rows).toHaveLength(1)
+  })
+
+  test('a card off the format is dropped, each for its own reason', async () => {
+    const ctx = await contextFor(BACKLOG)
+    for (const bad of [
+      create({ priority: 'Must' }),
+      create({ userStory: 'As a developer, I want the cache so that reruns are fast.' }),
+      create({ userStory: 'As a developer, I want to cache the parsed pages.' }),
+      create({ userStory: 'As an operator, I want to cache the parsed pages so that reruns are fast.' }),
+      create({ acceptanceCriteria: CRITERIA.slice(0, 2) }),
+      create({ acceptanceCriteria: [...CRITERIA, 'Fourth criterion', 'Fifth criterion', 'Sixth criterion'] }),
+      create({ tasks: [] }),
+      create({ tasks: Array.from({ length: 41 }, (_, i) => `Task ${i}`) }),
+      create({ title: 'Cache the `parsed` Pages' }),
+      create({ title: 'Cache the **Parsed** Pages' }),
+      create({ userStory: 'As a developer, I want to cache pages\nso that reruns are fast.' }),
+      create({ tasks: ['line\nbreak'] }),
+      create({ bucket: 'backlog' }),
+    ]) {
+      const { rows, dropped } = check([bad], ctx)
+      expect([bad, rows]).toEqual([bad, []])
+      expect(dropped).toHaveLength(1)
+    }
+  })
+
+  test('the source must be an open entry of a read backlog file that no card holds yet', async () => {
+    const ctx = await contextFor(BACKLOG)
+    const key = await sourceKey(CACHE)
+    const holder: Card = {
+      id: 'H8',
+      title: 'Something Else',
+      bucket: 'backlog',
+      percent: 0,
+      assigned: 'none',
+      etag: 'W/"h"',
+      details: { etag: 'W/"hd"', description: `<!-- board-src: alpha/backlog.md#${key} -->\n\nPriority: Low`, checklist: [] },
+    }
+    const twin: Card = { ...holder, id: 'H9', title: '2026-10-20 — Cache the `Parsed` Pages.', details: { etag: 'W/"h9"', description: 'old', checklist: [] } }
+    expect(check([create({ source: { file: 'alpha/backlog.md', heading: 'No Such Entry' } })], ctx).dropped[0]).toContain('keiner gelesenen Backlog-Datei')
+    expect(check([create({ source: { file: 'alpha/backlog.md', heading: '2026-10-01 — Old Exporter ✅ DONE' } })], ctx).dropped[0]).toContain('DONE')
+    expect(check([create({ source: { file: 'beta/backlog.md', heading: CACHE } })], ctx).dropped).toHaveLength(1)
+    expect(check([create()], ctx, [...cards, holder]).dropped[0]).toContain('hat schon eine Karte')
+    // An old card without a source line and the same title (date, backticks and full stop aside).
+    expect(normalTitle(twin.title)).toBe(normalTitle('Cache the Parsed Pages'))
+    expect(check([create()], ctx, [...cards, twin]).dropped[0]).toContain('gibt es schon')
+    // Two creates for one entry: the second goes.
+    expect(check([create(), create({ title: 'Cache Pages Again' })], ctx).rows).toHaveLength(1)
+  })
+
+  test('at most five new cards per run', async () => {
+    const text = Array.from({ length: 7 }, (_, i) => `## Entry Number ${i}\ntext`).join('\n')
+    const ctx = await contextFor(text)
+    const rows = Array.from({ length: 7 }, (_, i) => create({ title: `Entry Number ${i}`, source: { file: 'alpha/backlog.md', heading: `Entry Number ${i}` } }))
+    const checked = check(rows, ctx)
+    expect(checked.rows).toHaveLength(5)
+    expect(checked.dropped).toEqual(['Vorschlag 6: mehr als 5 neue Karten', 'Vorschlag 7: mehr als 5 neue Karten'])
+  })
+
+  test('without the skill file no card is created', async () => {
+    const ctx = await contextFor(BACKLOG, { hasSkill: false })
+    const checked = check([create()], ctx)
+    expect(checked.rows).toEqual([])
+    expect(checked.dropped[0]).toContain('gesperrt')
+  })
+
+  test('source sets the entry of an old card without one', async () => {
+    const ctx = await contextFor(BACKLOG)
+    const old: Card = { id: 'O1', title: 'Cache Pages', bucket: 'backlog', percent: 0, assigned: 'none', etag: 'W/"o"', details: { etag: 'W/"od"', description: 'old text', checklist: [] } }
+    const marked: Card = { ...old, id: 'O2', details: { etag: 'W/"o2"', description: '<!-- board-src: alpha/backlog.md#0123456789ab -->\nold', checklist: [] } }
+    const source = { file: 'alpha/backlog.md', heading: CACHE }
+    const { rows, dropped } = check(
+      [
+        { action: 'source', taskId: 'O1', source, evidence: 'alpha/backlog.md:3' },
+        { action: 'source', taskId: 'O2', source: { file: 'alpha/backlog.md', heading: '2026-10-21 — Tidy the Docs Folder' } },
+        create(),
+      ],
+      ctx,
+      [old, marked],
+    )
+    expect(rows).toEqual([{ n: 1, action: 'source', taskId: 'O1', title: 'Cache Pages', etag: 'W/"o"', detailsEtag: 'W/"od"', source, evidence: 'alpha/backlog.md:3' }])
+    // The second card has its line; the create's entry is now held by O1.
+    expect(dropped).toHaveLength(2)
+  })
+})
+
+describe('the Sprint Backlog', () => {
+  const backlogCard = (id: string): Card => ({
+    id,
+    title: `Card ${id}`,
+    bucket: 'backlog',
+    percent: 0,
+    assigned: 'none',
+    etag: `W/"${id}"`,
+    details: { etag: `W/"${id}d"`, description: '', checklist: [] },
+  })
+  const cards: Card[] = [
+    backlogCard('S1'),
+    backlogCard('S2'),
+    backlogCard('S3'),
+    backlogCard('S4'),
+    { id: 'P1', title: 'Running', bucket: 'in_progress', percent: 0, assigned: 'none', etag: 'W/"p"', details: { etag: 'W/"pd"', description: '', checklist: [] } },
+  ]
+  const steps = nextStepsOf('# Stand\n\n## Nächster Schritt\n\nShip the **cache** work, then tidy the docs.\n\n## Later\nnot this')
+  const ctx: Context = { ...NO_CONTEXT, nextSteps: steps }
+  const pull = (taskId: string, nextStep = 'ship the cache work') => ({ action: 'move', taskId, bucket: 'sprint_backlog', nextStep, evidence: 'Stand' })
+  const check = (rows: unknown[], on: Context = ctx) => {
+    const checked = checkProposal({ rows }, cards, [], CFG, on)
+    if (typeof checked === 'string') throw new Error(checked)
+    return checked
+  }
+
+  test('the section stops at the next heading of its level', () => {
+    expect(steps).toBe('Ship the **cache** work, then tidy the docs.')
+    expect(nextStepsOf('# Stand\nnothing')).toBeNull()
+  })
+
+  test('a pull from Backlog for a named next step goes, its evidence quoting the step', () => {
+    const { rows, dropped } = check([pull('S1')])
+    expect(dropped).toEqual([])
+    expect(rows).toEqual([{ n: 1, action: 'move', taskId: 'S1', title: 'Card S1', etag: 'W/"S1"', detailsEtag: 'W/"S1d"', bucket: 'sprint_backlog', evidence: 'Nächster Schritt: „ship the cache work“ – Stand' }])
+  })
+
+  test('another bucket, a fourth pull, an assignment, a step not in the section, no standFile: dropped', () => {
+    expect(check([pull('P1')]).dropped[0]).toContain('nur aus Backlog')
+    const four = check([pull('S1'), pull('S2'), pull('S3', 'tidy the docs'), pull('S4', 'tidy the docs')])
+    expect(four.rows).toHaveLength(3)
+    expect(four.dropped).toEqual(['Vorschlag 4: mehr als 3 Karten in den Sprint Backlog'])
+    const assigned = check([pull('S1'), { action: 'assign', taskId: 'S1' }])
+    expect(assigned.rows.map(r => r.action)).toEqual(['move'])
+    expect(assigned.dropped[0]).toContain('bleiben frei')
+    expect(check([pull('S1', 'release the parser')]).dropped[0]).toContain('nextStep')
+    expect(check([pull('S1')], NO_CONTEXT).dropped[0]).toContain('standFile')
   })
 })
 
@@ -883,6 +1116,40 @@ describe('a board run in the pane', () => {
 
     await until(seen, view, 'Abgebrochen – az: AADSTS')
     expect(seen.prompts).toEqual([])
+  })
+
+  test('the skill reaches the prompt word for word; a new card shows its source entry and itself', async ($, on) => {
+    const reply = JSON.stringify({ rows: [create({ source: { file: 'alpha/backlog.md', heading: CACHE } })] })
+    const seen = world(on, { reply, backlog: BACKLOG })
+    await start($, false)
+    await board($)
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (1)')
+
+    expect(seen.prompts[0]?.system).toContain('<create-backlog-skill>\n# Create Backlog\nSKILL BODY verbatim\n</create-backlog-skill>')
+    expect(seen.prompts[0]?.prompt).toContain('## Next steps (the stand file\'s section)\nWrite the parser docs next.')
+    await view.press({ key: 'row:1' })
+    const open = await until(seen, view, `Quelle: alpha/backlog.md › ${CACHE}`)
+    expect(open).toContain('A rerun should skip the parser.')
+    expect(open).toContain('Priority: Important')
+    expect(open).toContain(STORY)
+    expect(open).toContain('- Key entries by the input hash')
+    expect(open).toContain('- The cache folder is documented')
+    const document = JSON.parse(seen.files.get(`${DIR}/proposals-${stamped}.json`) ?? '{}')
+    expect(document.rows[0].source).toEqual({ file: 'alpha/backlog.md', heading: CACHE })
+  })
+
+  test('a missing skill file locks new cards and the pane says why', async ($, on) => {
+    const reply = JSON.stringify({ rows: [create(), { action: 'percent', taskId: T_OPEN, percent: 50, evidence: 'x' }] })
+    const seen = world(on, { reply, backlog: BACKLOG, noSkill: true })
+    await start($, false)
+    await board($)
+    const view = await pane($)
+
+    const ready = await until(seen, view, 'Übernehmen (1)')
+    expect(ready).toContain('Neue Karten gesperrt: Skill-Datei SKILL.md nicht lesbar.')
+    expect(seen.prompts[0]?.system).toContain('create: not available in this run')
+    expect(ready).toContain('neue Karten gesperrt')
   })
 
   test('an empty proposal stamps the run and shows no rows', async ($, on) => {

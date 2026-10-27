@@ -2,6 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, RenderElement } from 'claude-code'
 
 import {
+  DEFAULT_SKILL_PATH,
   GRAPH,
   PILL,
   PILL_BUSY,
@@ -13,10 +14,12 @@ import {
   checkedRows,
   clean,
   detailsFrom,
+  entriesOf,
   extractJson,
   isApplyCall,
   isStamped,
   lastRunMarkdown,
+  nextStepsOf,
   outcomeFrom,
   paneRows,
   parseConfig,
@@ -27,26 +30,27 @@ import {
   reminder,
   reportOutcome,
   sha256Hex,
+  sourceKey,
   stamp,
   systemPrompt,
   tableLines,
 } from './board'
-import type { Card, Config, Outcome, Pr, RepoFile, Row, Sources } from './board'
+import type { Card, Config, Context, Entry, Outcome, Pr, RepoFile, Row, Sources } from './board'
 import type { BoardCounts, BoardPhase, BoardResult, BoardRow } from '../types'
 
 const PANE = 'board-update'
 const PANE_TITLE = 'Board Update'
-const NO_COUNTS: BoardCounts = { cards: -1, prs: -1, backlog: -1, unreadable: 0, dropped: [] }
+const NO_COUNTS: BoardCounts = { cards: -1, prs: -1, backlog: -1, unreadable: 0, dropped: [], notices: [] }
 
 const running = atom({ plugin: 'board', key: 'running' } as const, false)
 const isTurnRunning = atom({ plugin: 'board', key: 'isTurnRunning' } as const, false)
 const startupChecked = atom({ plugin: 'board', key: 'startupChecked' } as const, false)
 const phase = atom({ plugin: 'board', key: 'phase' } as const, 'idle' as BoardPhase, { shape: 'phase-1' })
-const rows = atom({ plugin: 'board', key: 'rows' } as const, [] as BoardRow[], { shape: 'rows-1' })
+const rows = atom({ plugin: 'board', key: 'rows' } as const, [] as BoardRow[], { shape: 'rows-2' })
 const results = atom({ plugin: 'board', key: 'results' } as const, [] as BoardResult[], { shape: 'results-1' })
 const startedAt = atom({ plugin: 'board', key: 'startedAt' } as const, 0, { shape: 'startedAt-1' })
 const tick = atom({ plugin: 'board', key: 'tick' } as const, 0, { shape: 'tick-1' })
-const counts = atom({ plugin: 'board', key: 'counts' } as const, NO_COUNTS, { shape: 'counts-1' })
+const counts = atom({ plugin: 'board', key: 'counts' } as const, NO_COUNTS, { shape: 'counts-2' })
 const note = atom({ plugin: 'board', key: 'note' } as const, '', { shape: 'note-1' })
 
 const AZ_TIMEOUT_MS = 60_000
@@ -64,6 +68,8 @@ const GUARD_REFUSAL =
 // What a run holds between the proposal and the press on Übernehmen; a hot
 // reload drops it with the module (the pane then asks for a new run).
 type Pending = { cfg: Config; dir: string; at: string; now: number; file: string; hash: string; rows: Row[]; isComplete: boolean }
+
+type Collected = Sources & { unreadable: number; entries: Entry[]; nextSteps: string | null; skill: string | null }
 let pending: Pending | null = null
 // The model call of the run in flight, for Abbrechen.
 let stop: AbortController | null = null
@@ -146,7 +152,7 @@ function entryCount(texts: string[]): number {
 
 type Counted = (patch: Partial<BoardCounts>) => Promise<void>
 
-async function collect($: EngineInterface, cfg: Config, today: string, homeDir: string, counted: Counted): Promise<Sources & { unreadable: number }> {
+async function collect($: EngineInterface, cfg: Config, today: string, homeDir: string, counted: Counted): Promise<Collected> {
   const [{ cards, unreadable }, prs, backlogs, changelog] = await Promise.all([
     readCards($, cfg).then(async got => {
       await counted({ cards: got.cards.length, unreadable: got.unreadable })
@@ -175,7 +181,19 @@ async function collect($: EngineInterface, cfg: Config, today: string, homeDir: 
     })
     files.push({ name: `status file ${baseName(path)}`, text })
   }
-  return { cards, prs: prs.flat(), files, today, unreadable }
+  // The stand file's next steps feed the Sprint Backlog; without one, nothing is pulled.
+  let nextSteps: string | null = null
+  if (cfg.standFile !== undefined) {
+    const standFile = cfg.standFile
+    const text = await $.fs.read(local(standFile, homeDir)).catch(() => {
+      throw new Error(`standFile ${baseName(standFile)} nicht lesbar`)
+    })
+    nextSteps = nextStepsOf(text)
+  }
+  // The create-backlog skill, read word for word at each run; without it no card is created.
+  const skill = await $.fs.read(local(cfg.skillPath ?? DEFAULT_SKILL_PATH, homeDir)).catch(() => null)
+  const entries = cfg.backlogSources.flatMap((file, i) => entriesOf(`${file.repo}/${file.path}`, backlogs[i] ?? ''))
+  return { cards, prs: prs.flat(), files, today, unreadable, entries, nextSteps, skill }
 }
 
 async function readConfig($: EngineInterface, dir: string): Promise<Config> {
@@ -310,7 +328,13 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
     return { text: 'Board-Abgleich abgebrochen.', isHeld: false }
   }
   await $.fs.write(`${dir}/snapshot-${at}.json`, `${JSON.stringify({ at, cards: sources.cards, prs: sources.prs }, null, 2)}\n`)
-  const prompt = promptFor(sources, cfg)
+  const prompt = promptFor(sources, cfg, sources.nextSteps)
+  const notices = [
+    ...(sources.skill === null ? [`Neue Karten gesperrt: Skill-Datei ${baseName(cfg.skillPath ?? DEFAULT_SKILL_PATH)} nicht lesbar.`] : []),
+    ...(cfg.standFile !== undefined && sources.nextSteps === null ? ['Kein Abschnitt „Nächster Schritt“ in der standFile: keine Sprint-Vorschläge.'] : []),
+  ]
+  await update($, counts, c => ({ ...c, notices }))
+  if (!hasSurface) for (const line of notices) log($, `Board: ${line}`)
   // Cards that could not be read are not judged; such a run is no full review.
   const isComplete = sources.unreadable === 0
   if (!isComplete && !hasSurface) log($, `Board: Achtung – ${sources.unreadable} Karte(n) unlesbar, nicht bewertet.`)
@@ -319,7 +343,7 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
   $.ui.status('▦ Board: Opus bewertet …')
   stop = new AbortController()
   const reply = await $.model.complete(
-    { model: 'opus', effort: 'medium', system: systemPrompt(cfg), prompt, maxTokens: MAX_TOKENS, timeoutMs: MODEL_TIMEOUT_MS },
+    { model: 'opus', effort: 'medium', system: systemPrompt(cfg, sources.skill, sources.nextSteps !== null), prompt, maxTokens: MAX_TOKENS, timeoutMs: MODEL_TIMEOUT_MS },
     { signal: stop.signal },
   )
   if (isCancelled || (!reply.isAnswered && reply.reason === 'aborted')) {
@@ -332,7 +356,10 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
   }
   await $.fs.write(`${dir}/reply-${at}.txt`, reply.text)
 
-  const checked = checkProposal(extractJson(reply.text), sources.cards, sources.prs, cfg)
+  const keys = new Map<string, string>()
+  for (const entry of sources.entries) keys.set(entry.heading, await sourceKey(entry.heading))
+  const ctx: Context = { entries: sources.entries, keys, hasSkill: sources.skill !== null, nextSteps: sources.nextSteps }
+  const checked = checkProposal(extractJson(reply.text), sources.cards, sources.prs, cfg, ctx)
   if (typeof checked === 'string') throw new Error(`Bewertung unbrauchbar: ${checked} (Rohantwort reply-${at}.txt)`)
   await update($, counts, c => ({ ...c, dropped: checked.dropped.map(line => clean(line, 200)) }))
   if (checked.rows.length === 0) {
@@ -356,7 +383,7 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
   }
 
   pending = { cfg, dir, at, now, file, hash, rows: checked.rows, isComplete }
-  await update($, rows, () => paneRows(checked.rows, sources.cards))
+  await update($, rows, () => paneRows(checked.rows, sources.cards, sources.entries))
   await setPhase($, 'ready')
   stopTicker()
   $.ui.status('▦ Board: wartet auf Bestätigung im Fenster …')
@@ -558,7 +585,14 @@ export const register: Register = on => {
       </Button>
     )
     const counted = countLine(c)
-    const unreadable = c.unreadable > 0 ? <Text color="warning">Achtung – {c.unreadable} Karte(n) unlesbar, nicht bewertet.</Text> : null
+    const unreadable = (
+      <Box flexDirection="column">
+        {c.unreadable > 0 && <Text color="warning">Achtung – {c.unreadable} Karte(n) unlesbar, nicht bewertet.</Text>}
+        {c.notices.map(n => (
+          <Text color="warning">{n}</Text>
+        ))}
+      </Box>
+    )
 
     if (now === 'idle') {
       return (
@@ -625,6 +659,13 @@ export const register: Register = on => {
                   {r.before} → {r.after}
                 </Text>
               )}
+              {r.isOpen &&
+                r.detail.map(d => (
+                  <Text dimColor>
+                    {'    '}
+                    {d}
+                  </Text>
+                ))}
             </Box>
           )
         })}

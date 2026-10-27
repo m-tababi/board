@@ -14,9 +14,23 @@
     "app": "your-github-login/app",
     "docs": "your-github-login/docs"
   },
-  "backlogSources": [{ "repo": "app", "path": "backlog.md", "ref": "main" }],
-  "changelog": { "repo": "app", "path": "CHANGELOG.md", "ref": "main" },
-  "statusFiles": ["~/notes/status.md"],
+  "backlogSources": [
+    {
+      "repo": "app",
+      "path": "backlog.md",
+      "ref": "main"
+    }
+  ],
+  "changelog": {
+    "repo": "app",
+    "path": "CHANGELOG.md",
+    "ref": "main"
+  },
+  "statusFiles": [
+    "~/notes/status.md"
+  ],
+  "standFile": "~/notes/status.md",
+  "skillPath": "~/.claude/skills/create-backlog/SKILL.md",
   "skipTitlePrefixes": [],
   "promptRules": [],
   "extraStatuses": []
