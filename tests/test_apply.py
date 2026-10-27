@@ -574,6 +574,8 @@ class NewCards(Base):
             card(title="Cache [the](x) Pages"),
             card(title="Cache_the_Pages"),
             card(title="2026-10-20 — Cache the Parsed Pages"),
+            card(tasks=["Add <!-- board --> here"]),
+            card(acceptanceCriteria=CRITERIA[:2] + ["Ends <!-- /board -->"]),
             card(title="Cache Pages 2026-10-20 – Again"),
             card(source={"file": "alpha/backlog.md"}),
             card(source={"file": "../backlog.md", "heading": "x"}),

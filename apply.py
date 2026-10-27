@@ -224,6 +224,9 @@ def _check_card(row):
         raise Refusal(f"Zeile {n}: 1 bis {MAX_TASKS} tasks")
     if not isinstance(criteria, list) or not 3 <= len(criteria) <= 5:
         raise Refusal(f"Zeile {n}: 3 bis 5 acceptanceCriteria")
+    # An HTML comment in the card would stop every later marker on it.
+    if any("<!--" in x for x in [row["userStory"], *tasks, *criteria] if isinstance(x, str)):
+        raise Refusal(f"Zeile {n}: kein <!-- in userStory, tasks oder acceptanceCriteria")
     for item, limit in [(t, 100) for t in tasks] + [(c, 200) for c in criteria]:
         if len(_text(item, "tasks/acceptanceCriteria", limit).strip()) < 3 or item != item.strip():
             raise Refusal(f"Zeile {n}: Eintrag in tasks/acceptanceCriteria zu kurz oder mit Rand")

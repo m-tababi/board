@@ -564,6 +564,10 @@ function cardFieldsError(r: Record<string, unknown>): string | null {
     return `Titel 3–${MAX_CREATE_TITLE} Zeichen, ohne Datum, Markdown und Backticks`
   }
   if (!(PRIORITIES as readonly unknown[]).includes(r.priority)) return `priority nur ${PRIORITIES.join(', ')}`
+  // An HTML comment in the card would stop every later marker on it.
+  if ([r.userStory, ...(Array.isArray(r.tasks) ? r.tasks : []), ...(Array.isArray(r.acceptanceCriteria) ? r.acceptanceCriteria : [])].some(x => typeof x === 'string' && x.includes('<!--'))) {
+    return 'kein <!-- in Story, Tasks oder Kriterien'
+  }
   if (!isLine(r.userStory, 10, 600) || !STORY_RE.test(r.userStory)) return 'userStory nicht „As a developer, I want to … so that ….“'
   if (!Array.isArray(r.tasks) || r.tasks.length < 1 || r.tasks.length > MAX_TASKS || !r.tasks.every(t => isLine(t, 3, 100))) {
     return `tasks: 1 bis ${MAX_TASKS} einzeilige Einträge à 3–100 Zeichen`

@@ -571,6 +571,8 @@ describe('new cards in the create-backlog format', () => {
       create({ title: 'Cache the `parsed` Pages' }),
       create({ title: 'Cache the **Parsed** Pages' }),
       create({ title: '2026-10-20 — Cache the Parsed Pages' }),
+      create({ tasks: ['Add <!-- board --> here'] }),
+      create({ userStory: 'As a developer, I want to cache <!-- x --> pages so that reruns are fast.' }),
       create({ title: 'Cache Pages 2026-10-20 – Again' }),
       create({ userStory: 'As a developer, I want to cache pages\nso that reruns are fast.' }),
       create({ tasks: ['line\nbreak'] }),
