@@ -328,14 +328,14 @@ class Refusals(Base):
 class Writes(Base):
     def test_percent_move_assign_go_out_in_one_patch_with_the_read_etag(self):
         g = FakeGraph([task(T1)])
-        rows = [row(1, "percent", percent=100), row(2, "move", bucket="done"), row(3, "assign")]
+        rows = [row(1, "percent", percent=50), row(2, "move", bucket="in_progress"), row(3, "assign")]
         out = self.run_apply(g, rows, [1, 2, 3])
         self.assertEqual(out["status"], "ok")
         self.assertEqual(self.results(out), {1: "ok", 2: "ok", 3: "ok"})
         [(kind, tid, body)] = g.writes
         self.assertEqual((kind, tid), ("patch-task", T1))
-        self.assertEqual(body["percentComplete"], 100)
-        self.assertEqual(body["bucketId"], BUCKETS["done"])
+        self.assertEqual(body["percentComplete"], 50)
+        self.assertEqual(body["bucketId"], BUCKETS["in_progress"])
         self.assertEqual(list(body["assignments"]), [ME])
         patch = next(c for c in g.calls if "patch" in c)
         self.assertIn(f'If-Match=W/"t-{T1}"', patch)
@@ -367,6 +367,19 @@ class Writes(Base):
         self.assertEqual(self.results(out), {1: "skipped"})
         self.assertIn("412", out["rows"][0]["detail"])
         self.assertEqual(g.writes, [])
+
+    def test_assign_only_in_in_progress_or_with_a_selected_move_there(self):
+        for bucket, rows, selected, expected in (
+            ("backlog", [row(1, "assign")], [1], {1: "skipped"}),
+            ("sprint_backlog", [row(1, "move", bucket="in_progress"), row(2, "assign")], [2], {2: "skipped"}),
+            ("backlog", [row(1, "move", bucket="in_progress"), row(2, "assign")], [1, 2], {1: "ok", 2: "ok"}),
+            ("in_progress", [row(1, "assign")], [1], {1: "ok"}),
+        ):
+            g = FakeGraph([task(T1, bucket=bucket)])
+            out = self.run_apply(g, rows, selected)
+            self.assertEqual(self.results(out), expected, (bucket, selected))
+            if expected == {1: "skipped"} or expected == {2: "skipped"}:
+                self.assertEqual(g.writes, [])
 
     def test_assign_never_touches_a_card_someone_holds(self):
         g = FakeGraph([task(T1, assignments=[OTHER])])

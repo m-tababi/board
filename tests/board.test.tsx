@@ -912,9 +912,12 @@ describe('In Progress', () => {
     expect(check([start('B4', { pr: 174, repo: 'alpha' })]).rows).toEqual([])
   })
 
-  test('a start stands unticked in the pane', () => {
-    const { rows } = check([start('B1', { pr: 174, repo: 'alpha' })])
-    expect(paneRows(rows, cards)[0]?.isChecked).toBe(false)
+  test('a start stands unticked in the pane, and so does its assign', () => {
+    const { rows } = check([start('B1', { pr: 174, repo: 'alpha' }), { action: 'assign', taskId: 'B1' }])
+    expect(paneRows(rows, cards).map(r => [r.change, r.isChecked])).toEqual([
+      ['→ In Progress', false],
+      ['mir zuweisen', false],
+    ])
   })
 
   test('no proof, someone else’s PR, a merged PR, a piece of a line, no stand file: dropped', () => {

@@ -1225,6 +1225,11 @@ function rewriteLines(row: Extract<Row, { action: 'rewrite' }>, card: Card | und
   ]
 }
 
+// Whether this run moves the card into In Progress.
+function startsInRun(rows: Row[], taskId: string): boolean {
+  return rows.some(r => r.action === 'move' && r.taskId === taskId && r.bucket === 'in_progress')
+}
+
 export function paneRows(rows: Row[], cards: Card[], entries: Entry[] = []): PaneRow[] {
   const byId = new Map(cards.map(c => [c.id, c]))
   return rows.map(row => {
@@ -1271,8 +1276,9 @@ export function paneRows(rows: Row[], cards: Card[], entries: Entry[] = []): Pan
       before,
       after: clean(after, 200),
       detail,
-      // A rewrite replaces what people wrote, a start claims running work: both are taken over only on purpose.
-      isChecked: row.action !== 'rewrite' && !(row.action === 'move' && row.bucket === 'in_progress'),
+      // A rewrite replaces what people wrote, a start claims running work (with the assign that goes
+      // with it): all are taken over only on purpose.
+      isChecked: row.action !== 'rewrite' && !(row.action === 'move' && row.bucket === 'in_progress') && !(row.action === 'assign' && startsInRun(rows, row.taskId)),
       isOpen: false,
     }
   })

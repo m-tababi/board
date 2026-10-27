@@ -679,6 +679,12 @@ def _update(graph, group, today, note, outcome, cfg, state):
                 elif before:
                     note(r, "skipped", "Karte ist schon zugewiesen")
                     continue
+                elif live.get("bucketId") != cfg.buckets["in_progress"] and not any(
+                    x["action"] == "move" and x["bucket"] == "in_progress" for x in task_rows
+                ):
+                    # Backlog and Sprint Backlog cards stay free unless this run starts them.
+                    note(r, "skipped", "Karte liegt nicht in In Progress und wird nicht dorthin verschoben")
+                    continue
                 else:
                     body["assignments"] = _assignment(cfg.owner)
                 sent.append(r)
