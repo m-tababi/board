@@ -573,6 +573,8 @@ class NewCards(Base):
             card(title="Cache the *Parsed* Pages"),
             card(title="Cache [the](x) Pages"),
             card(title="Cache_the_Pages"),
+            card(title="2026-10-20 — Cache the Parsed Pages"),
+            card(title="Cache Pages 2026-10-20 – Again"),
             card(source={"file": "alpha/backlog.md"}),
             card(source={"file": "../backlog.md", "heading": "x"}),
             card(source={"file": "alpha/backlog.md", "heading": "two\nlines"}),

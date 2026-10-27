@@ -121,13 +121,15 @@ Not possible: deleting cards, renaming, assigning anyone else, writing free text
 
 The source of truth for the format is the `create-backlog` skill itself. The plugin and the write script check what a machine can check, and drop or refuse anything else:
 
-- Title 3–70 characters, one line, no backticks, no `*`, `_`, `[` or `](`.
+- Title 3–70 characters, one line, no date prefix (`2026-10-20 — …`), no backticks, no `*`, `_`, `[` or `](`.
 - Priority one of `Urgent`, `Important`, `Medium`, `Low`.
 - User story `As a developer, I want to … so that ….`
 - 1–40 tasks of 3–100 characters, 3–5 acceptance criteria of 3–200 characters; no line breaks or control characters in any field.
 - The source heading is an entry of a backlog file that was read, not in a `DONE` section, and no open card already carries its `board-src` line; no open card has the same title (date, backticks and punctuation aside), and no card at all has the exact title.
 
 "English" is asked of the model, not checked; the text is in the pane before you take it over.
+
+That a new card's title and content fit its source entry is **not** checked by machine: headings may be in another language than the English card, so no rule can compare them. The pane shows each new card's source heading and the entry's first lines right above the card; checking that they belong together is yours before Übernehmen.
 
 ## Security model
 

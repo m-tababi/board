@@ -17,6 +17,8 @@ export const DEFAULT_SKILL_PATH = '~/.claude/skills/create-backlog/SKILL.md'
 export const PRIORITIES = ['Urgent', 'Important', 'Medium', 'Low'] as const
 const STORY_RE = /^As a developer, I want to .{5,} so that .{5,}\.$/
 const TITLE_MARKUP_RE = /[`*_[]|\]\(/
+// A heading's date prefix ("2026-10-20 — …"): post-backlog drops it from the title.
+const DATE_TITLE_RE = /^\s*\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}\s*[—–]/
 const MAX_TASKS = 40
 export const STALE_DAYS = 7
 const DAY_MS = 24 * 60 * 60 * 1000
@@ -558,8 +560,8 @@ function sourceFrom(raw: unknown, ctx: Context): (Source & { key: string; entry:
 
 /** The create-backlog fields of a new card, or why they do not hold (apply.py checks the same). */
 function cardFieldsError(r: Record<string, unknown>): string | null {
-  if (!isLine(r.title, 3, MAX_CREATE_TITLE) || r.title.includes('<!--') || TITLE_MARKUP_RE.test(r.title)) {
-    return `Titel 3–${MAX_CREATE_TITLE} Zeichen, ohne Markdown und Backticks`
+  if (!isLine(r.title, 3, MAX_CREATE_TITLE) || r.title.includes('<!--') || TITLE_MARKUP_RE.test(r.title) || DATE_TITLE_RE.test(r.title)) {
+    return `Titel 3–${MAX_CREATE_TITLE} Zeichen, ohne Datum, Markdown und Backticks`
   }
   if (!(PRIORITIES as readonly unknown[]).includes(r.priority)) return `priority nur ${PRIORITIES.join(', ')}`
   if (!isLine(r.userStory, 10, 600) || !STORY_RE.test(r.userStory)) return 'userStory nicht „As a developer, I want to … so that ….“'
