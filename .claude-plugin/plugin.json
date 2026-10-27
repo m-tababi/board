@@ -1,8 +1,11 @@
 {
   "name": "board",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": { "name": "Mohamed Tababi" },
-  "description": "Reconciles a Microsoft Planner board with your repositories via the ▦ Board button or /board: Opus proposes, you confirm, apply.py writes only the confirmed rows.",
-  "types": "./types/index.d.ts",
-  "dependencies": ["session-handoff"]
+  "description": "Keeps a Microsoft Planner board in step with your GitHub repositories: the Board Update pane shows what Opus proposes, you check the rows, a fixed script writes only those.",
+  "license": "MIT",
+  "repository": "https://github.com/m-tababi/board",
+  "homepage": "https://github.com/m-tababi/board",
+  "keywords": ["planner", "board", "backlog", "pane", "github"],
+  "types": "./types/index.d.ts"
 }

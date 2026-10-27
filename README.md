@@ -1,43 +1,172 @@
 # board
 
-A Claude Code mod that reconciles a Microsoft Planner board with the state of your GitHub repositories. A button (` ▦ Board `) or `/board` collects the board, the PR list and your backlog files; Opus proposes changes; you confirm; a fixed script writes only the confirmed rows.
+A Claude Code plugin that keeps a Microsoft Planner board in step with your GitHub repositories. A button (` ▦ Board `) or `/board` opens a docked pane, **Board Update**: the plugin reads the board, the PR list and your backlog files, Opus proposes changes, you check or uncheck each one, and a fixed script writes only the rows you took over.
 
-Everything about your board (plan, buckets, your user id, repositories, paths) lives in a local config file outside the repository: `~/.claude/board/config.json`. The repository holds no personal values.
+- Finished work moves to Done, moved work changes columns, stale cards get a status marker.
+- New backlog entries become cards in the format of the `create-backlog` skill. Opus never invents a task: every new card belongs to exactly one entry of a backlog file.
+- The next steps named in your stand file can be pulled into the Sprint Backlog.
+- Nothing about your board is in this repository. Plan, buckets, user id, repositories and paths live in a local config file.
 
-## Flow
+The pane's labels are German.
 
-1. **Collect** without a shell (`$.process.run` with an argument list):
-   - Board: `az rest` GET on the plan's cards, plus the details (description, checklist, ETag) of every card not in Done. Every id is checked against `^[A-Za-z0-9_-]+$` before it enters a URL.
-   - Repositories: `gh api …/contents/<path>?ref=<ref>` for each backlog source and the changelog, `gh pr list --json` with metadata only (title, author, state, branch) for each configured repository. No `git fetch`.
-   - Status files (`statusFiles`): read only; an unreadable one stops the run before the model. No card read, or a missing or broken config, stops the run too.
-2. **Judge:** `$.model.complete` with `opus`, `effort: medium`, no tools. All data sits as untrusted material inside a `<data>` block.
-3. **Check:** the mod checks the JSON answer against a positive list and drops rows with a reason. Ids, ETags and titles come from its own read, never from the answer. At most 30 rows.
-4. **Show:** table `Nr | Karte | Aktion | Beleg` via `$.ui.log`, control characters removed.
-5. **Ask:** `$.ui.ask` — only `ja`, `nein` or, under "Other", `ja außer 3, 7`; anything else stops.
-6. **Write:** the mod writes `~/.claude/board/confirm.json` (hash, rows, time) and starts `<pythonPath> -I apply.py --proposals <file> --rows <n,…> --sha256 <hash> --report apply-<time>.jsonl`. apply.py runs only with that confirmation (at most 120 s old, same hash, same rows) and deletes it on reading (one-time token). Each row's result lands in the report at once (JSONL, fsynced). After 120 s apply.py starts no further card; the mod kills it at 330 s and then shows the rows from the report, and any selected row without an entry as "unknown – check the board".
+## The pane
 
-Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`, `proposals-<time>.json`, `apply-<time>.jsonl`, `last-run.md`.
+While it runs:
 
-## Actions apply.py allows
+```
+Opus denkt … 31 s
+53 Karten · 80 PRs · 106 Backlog-Einträge
+[ Abbrechen ]
+```
 
-| Action | Effect |
-|---|---|
-| `marker` | block `<!-- board -->` / `STATUS <date>: <status> · PR <repo>#<nr> · ref <path:line>` / `<!-- /board -->` at the top of the description; the rest byte-identical; only when the content changes |
-| `percent` | 0, 50 or 100 % |
-| `move` | bucket Backlog, Sprint Backlog, In Progress, In Review, Done |
-| `assign` | assign the owner (`ownerId` from the config), only when the card is free |
-| `create` | new card (title, bucket, optionally the owner, optionally a marker block) |
+With the proposals:
 
-Not allowed: deleting, foreign assignments, priorities, checklists, renames, free text on the board.
+```
+53 Karten · 80 PRs · 106 Backlog-Einträge · 4 Vorschläge
+[x] → Done  Fix Cache Race
+      Beleg: PR #133 merged, CHANGELOG 0.12.0
+      In Review → Done
+[x] Marker „erledigt“ · PR app#133  Fix Cache Race
+[ ] → Sprint Backlog  Tidy the Docs Folder
+[x] neu in Backlog (Important)  Cache the Parsed Pages
+      Quelle: app/backlog.md › 2026-10-20 — Cache the Parsed Pages
+        A rerun should skip the parser.
+      Karte:
+        Cache the Parsed Pages
+        Priority: Important
+        As a developer, I want to cache the parsed pages so that a rerun skips the parser.
+        Tasks:
+        - Add a cache folder per input
+        Acceptance Criteria:
+        - A rerun reads pages from the cache
+        - …
+2 Vorschläge verworfen: …
+[ Übernehmen (3) ]  [ Alle ab ]  [ Abbrechen ]
+```
+
+`[x]` / `[ ]` checks or unchecks a row; a press on the row opens its evidence, the value before and after and, for a new card, its source entry and the card as it will stand. After **Übernehmen** each row shows its result (`ok`, `übersprungen`, `unverändert`, `Fehler`, `nicht ausgeführt`, `unbekannt – auf dem Board prüfen`) as the write script reports it; **Schließen** closes the pane.
+
+The phases are `collecting`, `thinking`, `ready`, `applying` and `done` (or `failed`, with the reason). The seconds redraw once a second while a phase runs; Opus's answer does not stream, so there is no live text.
+
+## Requirements
+
+- Claude Code with plugin hooks modules (the early-access function-hooks API). Tested on Claude Code 2.1.311. A surface that draws panes: the terminal (fullscreen) or the desktop app.
+- [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), signed in (`az login`) with an account that can read and write the plan. The plugin calls `az rest` against Microsoft Graph.
+- [GitHub CLI](https://cli.github.com/) (`gh`), signed in (`gh auth login`), with read access to the configured repositories.
+- `python3` (3.8 or newer, standard library only) for the write script.
+- The `create-backlog` skill as a file (default `~/.claude/skills/create-backlog/SKILL.md`). Without it the plugin still runs but creates no cards.
+
+## Installation
+
+```
+/plugin install board --marketplace m-tababi/board
+```
+
+Then write your config (next section) and add this rule to `permissions.deny` in `~/.claude/settings.json`, so the main model cannot start the write script itself:
+
+```json
+"Bash(*board/apply.py*)"
+```
+
+For development, `claude --plugin-dir /path/to/board` loads a clone for one session.
 
 ## Configuration
 
-Copy `config.example.json` to `~/.claude/board/config.json` and fill it in. The mod and apply.py read the same file; apply.py checks it itself and refuses to run when it is missing or broken.
+Copy `config.example.json` to `~/.claude/board/config.json` and fill it in. The plugin and the write script read the same file; the write script checks it itself and refuses to write when it is missing or broken. The file stays on your machine; never commit it (`.gitignore` lists `config.json`).
 
-## Tests
+| Field | Required | Meaning |
+| --- | --- | --- |
+| `azPath` | yes | Absolute path of the `az` executable. |
+| `planId` | yes | The Planner plan's id (`az rest --method get --url https://graph.microsoft.com/v1.0/me/planner/plans`). |
+| `buckets` | yes | The plan's bucket ids under exactly these keys: `backlog`, `sprint_backlog`, `in_progress`, `in_review`, `done`. |
+| `ownerId` | yes | Your Entra user id (a GUID). The only person the plugin ever assigns. |
+| `ownerLogin` | yes | Your GitHub login. Cards tied to a PR by anyone else are never assigned to you. |
+| `repos` | yes | Short name → `owner/repo`. The short name is what a status marker names (`PR app#133`); each repository's last 40 PRs are read as metadata. |
+| `backlogSources` | yes | Backlog files read from GitHub: `[{ "repo": <short name>, "path": "backlog.md", "ref": "main" }]`. Each `## ` heading is one entry; a heading containing `DONE` marks a finished entry. |
+| `changelog` | no | One changelog file, same shape; its head (Unreleased and the two newest releases) is read. |
+| `statusFiles` | no | Local files read as context (absolute or `~/…`). One that cannot be read stops the run before the model. |
+| `standFile` | no | A local file with a `Nächster Schritt` / `Next step` heading. Only work named in that section is pulled into the Sprint Backlog. Without it no card is moved there. |
+| `skillPath` | no | The `create-backlog` skill file; default `~/.claude/skills/create-backlog/SKILL.md`. |
+| `skipTitlePrefixes` | no | Cards whose title starts with one of these (case aside) are never touched. |
+| `promptRules` | no | Extra rules for this board, one English sentence each, appended to the model's rules. |
+| `extraStatuses` | no | Marker statuses beyond `open`, `in_progress`, `in_review`, `done`, `outdated`, `superseded`, `blocked` (lower case, `_` for spaces). |
+| `ghPath`, `pythonPath` | no | Absolute paths; defaults `/usr/bin/gh` and `/usr/bin/python3`. |
 
-```bash
-python -m pytest tests/        # apply.py against a fake Graph and a made-up config
-claude plugin test .           # mod logic and flow
+## What a run does
+
+1. **Collect** without a shell (each program started with an argument list): the plan's cards via `az rest` GET, the details (description, checklist, ETag) of every card not in Done, the PR metadata via `gh pr list --json`, the backlog files and the changelog via `gh api …/contents`, the status and stand files, the skill file. Every id is checked against `^[A-Za-z0-9_-]+$` before it enters a URL.
+2. **Judge:** one `$.model.complete` call, `opus`, `effort: medium`, no tools. All collected data sits as untrusted material inside a `<data>` block; the skill file goes into the rules word for word.
+3. **Check:** the plugin checks every proposed row against a positive list and drops what does not hold, with a reason shown in the pane. Ids, ETags and titles come from its own read, never from the answer. At most 30 rows.
+4. **Show** them in the pane. **Übernehmen** writes `~/.claude/board/confirm.json` (hash of the proposal file, the checked rows, the time) and starts `python3 -I apply.py --proposals <file> --rows <n,…> --sha256 <hash> --report <file>.jsonl`.
+
+Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`, `proposals-<time>.json`, `apply-<time>.jsonl`, `last-run.md`.
+
+### Actions
+
+| Action | Effect on the board |
+| --- | --- |
+| `percent` | 0, 50 or 100 %. |
+| `move` | Another bucket. Into the Sprint Backlog only from Backlog, for a step named in the stand file, at most 3 per run, never assigned. |
+| `assign` | Assigns the owner, only on a free card in In Progress. |
+| `marker` | A block `<!-- board -->` / `STATUS <date>: <status> · PR <repo>#<nr> · ref <path:line>` / `<!-- /board -->` at the top of the description; the rest stays byte-identical. A block edited by hand, or a second one, is left alone. |
+| `create` | A new card in Backlog, unassigned, at most 5 per run, mapped as the `post-backlog` skill does: the title without the date, priority Urgent 1 / Important 3 / Medium 5 / Low 9, a description of `Priority`, user story and acceptance criteria, the tasks as checklist (at most 20, the rest under `Remaining tasks:`). A line `<!-- board-src: <file>#<hash of the heading> -->` on top names the entry; markers go below it. |
+| `source` | Puts only that `board-src` line on top of an older card that covers an entry but has none. |
+
+Not possible: deleting cards, renaming, assigning anyone else, writing free text.
+
+### What a new card must be
+
+The source of truth for the format is the `create-backlog` skill itself. The plugin and the write script check what a machine can check, and drop or refuse anything else:
+
+- Title 3–70 characters, one line, no backticks, no `*`, `_`, `[` or `](`.
+- Priority one of `Urgent`, `Important`, `Medium`, `Low`.
+- User story `As a developer, I want to … so that ….`
+- 1–40 tasks of 3–100 characters, 3–5 acceptance criteria of 3–200 characters; no line breaks or control characters in any field.
+- The source heading is an entry of a backlog file that was read, not in a `DONE` section, and no open card already carries its `board-src` line; no open card has the same title (date, backticks and punctuation aside), and no card at all has the exact title.
+
+"English" is asked of the model, not checked; the text is in the pane before you take it over.
+
+## Security model
+
+- **One-time confirmation.** The write script runs only with `confirm.json` written by the plugin after the press on Übernehmen: at most 120 s old, the same hash, the same rows. It deletes the file on reading; a left-over one is deleted at the start of each run.
+- **Hash of what you saw.** The proposal file is read once, hashed and parsed from those bytes; a different hash refuses the run.
+- **Strict schema.** Unknown fields, unknown actions, a user id anywhere in the file, bad ids or ETags refuse the whole file before any write.
+- **Optimistic writes.** Every PATCH carries `If-Match` with the ETag read before; a card changed since, or a 412, is skipped. Assignments are compared before and after each task PATCH; an unexpected change stops the run.
+- **Bounded time.** No card starts after 120 s, each `az` call is cut at 30 s, the plugin kills the script at 330 s and shows every row the JSONL report holds; a row without a line is marked unknown.
+- **Guard.** A `tool.call` hook refuses Bash commands that call the write script: as the program, as the script of a python interpreter or a shell, also inside `$( … )`, backticks, `sh -c` or an expanding heredoc. Commands that only name the file (`grep`, `cat`, `sed -n`, heredoc bodies, commit messages) pass. Together with the deny rule above it catches accidents.
+- **Honest limits.** The guard is a tripwire, not a boundary: a variable or a renamed copy gets past it, and a model that can write files could forge a confirmation. If your settings already let the model write to Planner (an MCP server, `az` in an allowed command), the plugin adds no barrier against that. The real boundary is who holds the Planner rights.
+
+## The reminder
+
+At the start of an interactive session a toast says when the last review is more than 7 days old. A review is a run that wrote at least one row (or found it already so), a run with nothing to propose, or a deliberate no (Abbrechen after the proposals were shown or while Opus judged, Übernehmen with nothing checked); the last kinds only when every card could be read.
+
+Without a surface (`claude -p "/board"`) the run is a dry run: the proposal table goes to the log and nothing is written.
+
+## Development
+
+```
+python -m pytest tests/        # the write script against a fake Graph and a made-up config
+claude plugin test .           # plugin logic, the pane and the run
 claude plugin validate .
 ```
+
+```
+.claude-plugin/
+  plugin.json        manifest
+  marketplace.json   single-plugin marketplace pointing at this repository
+hooks/
+  hooks.json         names the hooks module
+  register.tsx       collecting, the model call, the pane, the pill, the guard, the reminder
+  board.ts           pure logic: config check, prompt, proposal checks, guard, texts
+types/index.d.ts     state contract (PluginState)
+tests/
+  board.test.tsx     plugin tests
+  test_apply.py      write-script tests
+apply.py             the write script (standard library only)
+config.example.json  every config field with made-up values
+tsconfig.json
+```
+
+## License
+
+MIT

@@ -1,0 +1,14 @@
+{
+  "name": "board",
+  "owner": { "name": "Mohamed Tababi" },
+  "metadata": {
+    "description": "Single-plugin marketplace for board."
+  },
+  "plugins": [
+    {
+      "name": "board",
+      "source": "./",
+      "description": "Keeps a Microsoft Planner board in step with your GitHub repositories: the Board Update pane shows what Opus proposes, you check the rows, a fixed script writes only those."
+    }
+  ]
+}
