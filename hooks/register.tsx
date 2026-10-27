@@ -77,6 +77,8 @@ let pending: Pending | null = null
 // The model call of the run in flight, for Abbrechen.
 let stop: AbortController | null = null
 let isCancelled = false
+// Set on the first press on Übernehmen, before any await: one apply per proposal set.
+let isApplying = false
 let ticker: { cancel: () => void } | null = null
 
 function toast($: EngineInterface, text: string): void {
@@ -395,6 +397,7 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
   }
 
   pending = { cfg, dir, at, now, file, hash, rows: checked.rows, isComplete }
+  isApplying = false
   await update($, rows, () => paneRows(checked.rows, sources.cards, sources.entries))
   await setPhase($, 'ready')
   stopTicker()
@@ -404,7 +407,12 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
 
 // Übernehmen (n): the checked rows go to apply.py with the one-time confirmation.
 async function applyChecked($: EngineInterface): Promise<void> {
-  if ((await read($, phase)) !== 'ready') return
+  if (isApplying) return
+  isApplying = true
+  if ((await read($, phase)) !== 'ready') {
+    isApplying = false
+    return
+  }
   const held = pending
   if (held === null) {
     await setPhase($, 'failed', 'Vorschläge nach dem Neuladen verloren – Lauf neu starten.')

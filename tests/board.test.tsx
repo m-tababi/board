@@ -897,6 +897,19 @@ describe('a board run in the pane', () => {
     expect(seen.closed).toEqual(['board-update'])
   })
 
+  test('two presses on Übernehmen run apply.py once', async ($, on) => {
+    const seen = world(on, { slow: { apply: 2000 } })
+    await start($, false)
+    await board($)
+    const view = await pane($)
+    await until(seen, view, 'Übernehmen (3)')
+
+    await Promise.all([view.press({ key: 'apply' }), view.press({ key: 'apply' })])
+    await seen.clock.advance(2000)
+    await until(seen, view, 'Ausgeführt: 3 von 3 Zeilen ok.')
+    expect(seen.runs.filter(argv => argv[0] === PYTHON)).toHaveLength(1)
+  })
+
   test('the rows’ results come from apply.py’s report while it runs', async ($, on) => {
     const seen = world(on, { slow: { apply: 5000 }, apply: { results: ['ok', 'skipped', 'ok'] } })
     await start($, false)
