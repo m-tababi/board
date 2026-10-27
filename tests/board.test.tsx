@@ -806,6 +806,10 @@ describe('helpers', () => {
       'cat <<EOF\n$(python3 board/apply.py)\nEOF',
       'ls; python3 apply.py',
       'python3 "board/apply.py',
+      'cd ~/claude-mods/board && cat apply.py | python3 -',
+      `cd ~/claude-mods/board && python3 -c "exec(open('apply.py').read())"`,
+      'python3 -m runpy ~/claude-mods/board/apply.py',
+      'cd ~/claude-mods/board && bash < run-apply.sh; cat apply.py | sh',
     ]) {
       expect([command, isApplyCall(command)]).toEqual([command, true])
     }
@@ -941,7 +945,10 @@ describe('a board run in the pane', () => {
 
     await view.press({ key: 'cancel' })
     await settled(seen)
-    // The kit may hold the hook's answer until its sleep is over; the run ends either way.
+    // The pane closes at once. The test kit holds the stand-in model hook until
+    // its sleep is over (the real signal path is not seen here); the run then
+    // ends on the cancel flag either way.
+    expect(seen.closed).toEqual(['board-update'])
     await seen.clock.advance(60_000)
     await settled(seen)
 

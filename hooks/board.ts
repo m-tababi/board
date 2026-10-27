@@ -1070,6 +1070,8 @@ export async function sha256Hex(text: string): Promise<string> {
 const APPLY_PATH = /board\/[^\s'"]*apply\.py/i
 const APPLY_SCRIPT = /\bpython[0-9.]*\b[^;&|]*\bapply\.py\b/i
 const SCRIPT_NAME = /^apply\.py$/i
+// The file named anywhere in a line (test_apply.py has no word boundary before "apply").
+const SCRIPT_WORD = /\bapply\.py\b/i
 const PYTHON_NAME = /^(python[0-9.]*|pypy[0-9.]*)$/i
 const SHELL_NAME = /^(sh|bash|zsh|dash|ksh)$/
 // Words in front of the program that only start it: assignments, wrappers, their options and counts.
@@ -1242,13 +1244,30 @@ function scriptOperand(args: string[]): { script?: string; code?: string } {
   return {}
 }
 
-function runsScript(words: string[], depth: number): boolean {
+// The program a simple command runs, past assignments and wrappers, and its arguments.
+function programOf(words: string[]): { program: string; args: string[] } {
   let at = 0
   while (at < words.length && (ASSIGNMENT.test(words[at] as string) || WRAPPERS.has(baseName(words[at] as string)) || (at > 0 && ((words[at] as string).startsWith('-') || COUNT.test(words[at] as string))))) {
     at += 1
   }
-  const program = baseName(words[at] ?? '')
-  const args = words.slice(at + 1)
+  return { program: baseName(words[at] ?? ''), args: words.slice(at + 1) }
+}
+
+// An interpreter that reads its program from somewhere other than a script
+// operand: python -c, -m or stdin, a shell on stdin. What it runs cannot be
+// told from the words, so the whole line is held against the file's name.
+function isOpenInterpreter(words: string[]): boolean {
+  const { program, args } = programOf(words)
+  if (PYTHON_NAME.test(program)) return scriptOperand(args).script === undefined
+  if (SHELL_NAME.test(program)) {
+    const { script, code } = scriptOperand(args)
+    return script === undefined && code === undefined
+  }
+  return false
+}
+
+function runsScript(words: string[], depth: number): boolean {
+  const { program, args } = programOf(words)
   if (SCRIPT_NAME.test(program)) return true
   if (PYTHON_NAME.test(program)) {
     const { script } = scriptOperand(args)
@@ -1267,14 +1286,17 @@ function callsScript(command: string, depth: number): boolean {
   if (depth > 4) return true
   const split = splitCommand(command)
   if (split === null) return APPLY_PATH.test(command) || APPLY_SCRIPT.test(command)
+  if (split.commands.some(isOpenInterpreter) && SCRIPT_WORD.test(command)) return true
   return split.commands.some(words => runsScript(words, depth)) || split.nested.some(text => callsScript(text, depth + 1))
 }
 
 /**
  * Commands the main model must not run: a call of the mod's apply.py, as the
  * program, as the script of a python interpreter or of a shell, also inside
- * $( … ), backticks or sh -c. Naming the file is no call: grep, cat or sed on
- * it, a heredoc body or a commit message pass. A tripwire against accidents,
+ * $( … ), backticks or sh -c; and any line that names the file beside a python
+ * reading -c, -m or stdin, or a shell reading stdin. Naming the file is no call:
+ * grep, cat or sed on it, a heredoc body or a commit message pass, as long as
+ * no such interpreter runs in the same line. A tripwire against accidents,
  * not a boundary: a variable or a renamed copy gets past it; the hurdle is the
  * one-time confirmation the mod writes after the confirmation in its window.
  */
