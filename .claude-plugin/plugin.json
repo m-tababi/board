@@ -1,0 +1,8 @@
+{
+  "name": "board",
+  "version": "0.1.0",
+  "author": { "name": "Mohamed Tababi" },
+  "description": "Reconciles a Microsoft Planner board with your repositories via the ▦ Board button or /board: Opus proposes, you confirm, apply.py writes only the confirmed rows.",
+  "types": "./types/index.d.ts",
+  "dependencies": ["session-handoff"]
+}

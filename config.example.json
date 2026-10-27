@@ -1,0 +1,23 @@
+{
+  "azPath": "/usr/local/bin/az",
+  "planId": "ExamplePlanId0000000000001",
+  "buckets": {
+    "backlog": "ExampleBucketBacklog000001",
+    "sprint_backlog": "ExampleBucketSprint0000001",
+    "in_progress": "ExampleBucketProgress00001",
+    "in_review": "ExampleBucketReview0000001",
+    "done": "ExampleBucketDone000000001"
+  },
+  "ownerId": "00000000-0000-4000-8000-000000000000",
+  "ownerLogin": "your-github-login",
+  "repos": {
+    "app": "your-github-login/app",
+    "docs": "your-github-login/docs"
+  },
+  "backlogSources": [{ "repo": "app", "path": "backlog.md", "ref": "main" }],
+  "changelog": { "repo": "app", "path": "CHANGELOG.md", "ref": "main" },
+  "statusFiles": ["~/notes/status.md"],
+  "skipTitlePrefixes": [],
+  "promptRules": [],
+  "extraStatuses": []
+}

@@ -1,0 +1,7 @@
+__pycache__/
+.ruff_cache/
+.claude-plugin/types/
+.pytest_cache/
+
+# The owner's real config never enters the repository
+config.json
