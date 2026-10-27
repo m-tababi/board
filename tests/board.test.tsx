@@ -95,13 +95,13 @@ const create = (extra: Record<string, unknown> = {}) => ({
   evidence: 'alpha/backlog.md:3',
   ...extra,
 })
-const NO_CONTEXT: Context = { entries: [], keys: new Map(), hasSkill: true, nextSteps: null }
+const NO_CONTEXT: Context = { entries: [], keys: new Map(), hasSkill: true, nextSteps: null, standText: null }
 
 async function contextFor(text: string, extra: Partial<Context> = {}): Promise<Context> {
   const entries = entriesOf('alpha/backlog.md', text)
   const keys = new Map<string, string>()
   for (const e of entries) keys.set(e.heading, await sourceKey(e.heading))
-  return { entries, keys, hasSkill: true, nextSteps: null, ...extra }
+  return { entries, keys, hasSkill: true, nextSteps: null, standText: null, ...extra }
 }
 
 const T_OPEN = 'TaskOpen0000000000000001'
@@ -486,7 +486,13 @@ describe('proposal check', () => {
     expect(checked.rows.map(r => ('taskId' in r ? r.taskId : ''))).toEqual(['A1'])
     expect(checked.dropped).toHaveLength(2)
 
-    const moved = checkProposal({ rows: [{ action: 'move', taskId: 'E5', bucket: 'in_progress' }, { action: 'assign', taskId: 'E5' }] }, more, prs, CFG, NO_CONTEXT)
+    const moved = checkProposal(
+      { rows: [{ action: 'move', taskId: 'E5', bucket: 'in_progress', progress: { standLine: 'Backlog card runs' } }, { action: 'assign', taskId: 'E5' }] },
+      more,
+      prs,
+      CFG,
+      { ...NO_CONTEXT, standText: 'Backlog card runs' },
+    )
     if (typeof moved === 'string') throw new Error(moved)
     expect(moved.rows.map(r => r.action)).toEqual(['move', 'assign'])
   })
@@ -764,6 +770,51 @@ describe('rewriting old cards into the skill format', () => {
       '  [ ] Key entries by the input hash',
       '  (board-src-Zeile und Markerblock bleiben oben stehen)',
     ])
+  })
+})
+
+describe('In Progress', () => {
+  const card = (id: string, bucket: BucketKey): Card => ({
+    id,
+    title: `Card ${id}`,
+    bucket,
+    percent: 0,
+    assigned: 'none',
+    etag: `W/"${id}"`,
+    details: { etag: `W/"${id}d"`, description: '', checklist: [] },
+  })
+  const cards = [card('B1', 'backlog'), card('B2', 'sprint_backlog'), card('B3', 'in_review')]
+  const prs: Pr[] = [
+    { repo: 'alpha', number: 174, title: 't', author: 'owner-login', state: 'OPEN', isDraft: false, mergedAt: null, updatedAt: '', branch: '' },
+    { repo: 'alpha', number: 133, title: 't', author: 'someone', state: 'OPEN', isDraft: false, mergedAt: null, updatedAt: '', branch: '' },
+    { repo: 'alpha', number: 160, title: 't', author: 'owner-login', state: 'MERGED', isDraft: false, mergedAt: 'x', updatedAt: '', branch: '' },
+  ]
+  const ctx: Context = { ...NO_CONTEXT, standText: '# Stand\n\n## Läuft\n- Cache work runs on branch feature/cache\n' }
+  const start = (taskId: string, progress?: unknown) => ({ action: 'move', taskId, bucket: 'in_progress', ...(progress === undefined ? {} : { progress }), evidence: 'x' })
+  const check = (rows: unknown[], on: Context = ctx) => {
+    const checked = checkProposal({ rows }, cards, prs, CFG, on)
+    if (typeof checked === 'string') throw new Error(checked)
+    return checked
+  }
+
+  test('an open PR of the owner or a whole line of the stand file starts a card, with assign', () => {
+    const viaPr = check([start('B1', { pr: 174, repo: 'alpha' }), { action: 'assign', taskId: 'B1' }])
+    expect(viaPr.dropped).toEqual([])
+    expect(viaPr.rows.map(r => r.action)).toEqual(['move', 'assign'])
+    expect(viaPr.rows[0]?.evidence).toBe('Läuft: PR alpha#174 – x')
+    const viaLine = check([start('B2', { standLine: 'Cache work runs on branch feature/cache' })])
+    expect(viaLine.rows[0]?.evidence).toBe('Läuft: „Cache work runs on branch feature/cache“ – x')
+  })
+
+  test('no proof, someone else’s PR, a merged PR, a piece of a line, no stand file: dropped', () => {
+    for (const progress of [undefined, { pr: 133, repo: 'alpha' }, { pr: 160, repo: 'alpha' }, { pr: 999, repo: 'alpha' }, { standLine: 'Cache work' }, { standLine: 'x', pr: 174 }]) {
+      const { rows, dropped } = check([start('B1', progress)])
+      expect([progress, rows]).toEqual([progress, []])
+      expect(dropped[0]).toContain('In Progress nur mit')
+    }
+    expect(check([start('B1', { standLine: 'Cache work runs on branch feature/cache' })], NO_CONTEXT).rows).toEqual([])
+    // From another bucket the rule does not apply.
+    expect(check([start('B3')]).rows).toHaveLength(1)
   })
 })
 

@@ -416,6 +416,8 @@ export type Context = {
   keys: Map<string, string>
   hasSkill: boolean
   nextSteps: string | null
+  // The whole stand file: a line of it may show that work is running.
+  standText: string | null
 }
 
 /** The rules the model judges by; the config adds the board's own, the create-backlog skill shapes new cards. */
@@ -450,6 +452,8 @@ For every open card (bucket other than done) decide whether the board matches re
 - A card in in_review whose PR is merged -> done; whose PR is open -> marker in_review with that PR.
 - Propose nothing that is already so: no percent equal to the card's percent, no move to its own bucket, no marker when the <!-- board --> block at the top of its description already states that status, PR and ref.
 
+In Progress: move a card from backlog or sprint_backlog to in_progress only when its work is running, and give the proof as progress: either {"pr":N,"repo":R}, an open PR by ${cfg.ownerLogin} for this work from the PR list, or {"standLine":L}, one whole line of the stand file copied exactly that says the work is running. Propose assign for the card in the same answer. Without such proof leave the card where it is.
+
 Assignment rule: a card in in_progress with assigned = "none" -> propose assign (it gets the board's owner). Cards for the owner's running work -> assign. Never propose assign for a card with assigned "someone_else" or for a card tied to a PR whose author is not ${cfg.ownerLogin}. Backlog and sprint_backlog cards without assignment stay free.
 
 ${sprint}
@@ -458,7 +462,7 @@ ${create}
 
 Allowed actions, nothing else (no deletion, no renames, no free text on the board):
 - {"action":"percent","taskId":ID,"percent":0|50|100,"evidence":E}
-- {"action":"move","taskId":ID,"bucket":"backlog"|"sprint_backlog"|"in_progress"|"in_review"|"done","nextStep":N,"evidence":E} (nextStep only for sprint_backlog)
+- {"action":"move","taskId":ID,"bucket":"backlog"|"sprint_backlog"|"in_progress"|"in_review"|"done","nextStep":N,"progress":{...},"evidence":E} (nextStep only for sprint_backlog, progress only for in_progress from backlog or sprint_backlog)
 - {"action":"assign","taskId":ID,"evidence":E}
 - {"action":"marker","taskId":ID,"marker":{"status":S,"repo":${repos.map(r => JSON.stringify(r)).join('|')},"pr":N,"ref":R},"evidence":E}
 - {"action":"source","taskId":ID,"source":{"file":F,"heading":H},"evidence":E}
@@ -595,7 +599,7 @@ function rejectedOf(item: Record<string, unknown> | null, byId: Map<string, Card
 
 const MODEL_KEYS: Record<Action, string[]> = {
   percent: ['action', 'taskId', 'percent', 'evidence'],
-  move: ['action', 'taskId', 'bucket', 'nextStep', 'evidence'],
+  move: ['action', 'taskId', 'bucket', 'nextStep', 'progress', 'evidence'],
   assign: ['action', 'taskId', 'evidence'],
   marker: ['action', 'taskId', 'marker', 'evidence'],
   source: ['action', 'taskId', 'source', 'evidence'],
@@ -643,6 +647,19 @@ function prOfCard(card: Card): Marker | undefined {
   const inside = BLOCK_RE.exec((card.details?.description ?? '').slice(head.length))?.[1] ?? ''
   const found = / · PR ([A-Za-z0-9_.-]{1,40})#(\d{1,5})(?: |$)/.exec(inside)
   return found === null ? undefined : { status: 'open', repo: found[1] as string, pr: Number(found[2]) }
+}
+
+/** The proof that a card's work runs, as the pane names it; null when the data does not show it. */
+function progressOf(raw: unknown, prs: Pr[], cfg: Config, ctx: Context): string | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const p = raw as Record<string, unknown>
+  const keys = Object.keys(p).sort().join()
+  if (keys === 'pr,repo') {
+    const pr = prs.find(x => x.repo === p.repo && x.number === p.pr)
+    return pr !== undefined && pr.state === 'OPEN' && pr.author === cfg.ownerLogin ? `PR ${pr.repo}#${pr.number}` : null
+  }
+  if (keys === 'standLine' && ctx.standText !== null && isNamedStep(p.standLine, ctx.standText)) return `„${clean(p.standLine, 100)}“`
+  return null
 }
 
 function cardFieldsError(r: Record<string, unknown>): string | null {
@@ -849,6 +866,15 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
         }
         sprints += 1
         why = clean(`Nächster Schritt: „${clean(r.nextStep, 100)}“ – ${evidence}`, 300)
+      }
+      if (r.bucket === 'in_progress' && (card.bucket === 'backlog' || card.bucket === 'sprint_backlog')) {
+        // Started only for running work: an open PR of the owner's, or a line of the stand file that says so.
+        const proof = progressOf(r.progress, prs, cfg, ctx)
+        if (proof === null) {
+          drop(at, r, `In Progress nur mit offenem PR von ${cfg.ownerLogin} oder einer Zeile der standFile als Beleg`)
+          continue
+        }
+        why = clean(`Läuft: ${proof} – ${evidence}`, 300)
       }
       row = { ...base, evidence: why, action, bucket: r.bucket as BucketKey }
     } else if (action === 'assign') {
