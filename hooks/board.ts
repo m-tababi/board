@@ -804,6 +804,8 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
   let creates = 0
   let sprints = 0
   let rewrites = 0
+  // Titles the run's creates and rewrites give out.
+  const runTitles = new Set<string>()
 
   for (const [i, item] of ((raw as { rows: unknown[] }).rows).entries()) {
     const at = `Vorschlag ${i + 1}`
@@ -859,6 +861,7 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
       }
       creates += 1
       titles.add(title.toLowerCase())
+      runTitles.add(title.toLowerCase())
       openTitles.add(normalTitle(title))
       sources.add(`${src.file}#${src.key}`)
       rows.push({
@@ -996,7 +999,7 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
         continue
       }
       const newTitle = r.title as string
-      if (cards.some(c => c.id !== card.id && c.title.trim().toLowerCase() === newTitle.toLowerCase())) {
+      if (cards.some(c => c.id !== card.id && c.title.trim().toLowerCase() === newTitle.toLowerCase()) || runTitles.has(newTitle.toLowerCase())) {
         drop(at, r, `eine andere Karte trägt diesen Titel schon`)
         continue
       }
@@ -1005,6 +1008,9 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
         continue
       }
       rewrites += 1
+      // The new title counts for the rows after it, as a create's does.
+      titles.add(newTitle.toLowerCase())
+      runTitles.add(newTitle.toLowerCase())
       row = {
         ...base,
         action,

@@ -659,6 +659,9 @@ def _update(graph, group, today, note, outcome, cfg, state):
                         held.add(r["n"])
                         continue
                     _prepare_rewrite(graph, task_id, r, note, held, prepared)
+                    if r["n"] not in held:
+                        # The new title counts for the rows after it.
+                        state["titles"][task_id] = r["newTitle"].lower()
             body, sent = {}, []
             for r in task_rows:
                 if r["action"] == "percent":

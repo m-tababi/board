@@ -822,6 +822,15 @@ class Rewrites(Base):
         g = FakeGraph([self.old_card(title_override="Cache the Parsed Pages")])
         self.assertEqual(self.results(self.run_apply(g, [rewrite()], [1])), {1: "ok"})
 
+    def test_two_rewrites_or_a_rewrite_and_a_create_never_give_out_one_title(self):
+        g = FakeGraph([self.old_card(), task(T2, description="old")])
+        out = self.run_apply(g, [rewrite(), rewrite(n=2, tid=T2)], [1, 2])
+        self.assertEqual(self.results(out), {1: "ok", 2: "skipped"})
+        g = FakeGraph([self.old_card()])
+        out = self.run_apply(g, [rewrite(), card(n=2)], [1, 2])
+        self.assertEqual(self.results(out), {1: "ok", 2: "skipped"})
+        self.assertEqual([w[0] for w in g.writes], ["patch-task", "patch-details"])
+
     def test_a_changed_card_is_skipped_whole(self):
         changed = self.old_card()
         changed["etag"] = 'W/"someone-else"'

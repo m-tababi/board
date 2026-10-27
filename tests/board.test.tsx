@@ -795,6 +795,18 @@ describe('rewriting old cards into the skill format', () => {
     ])
   })
 
+  test('two rewrites, or a rewrite and a create, never give out one title', async () => {
+    const cards = [oldCard('R1'), oldCard('R2')]
+    const twice = check([fix('R1'), fix('R2')], cards)
+    expect(twice.rows).toHaveLength(1)
+    expect(twice.dropped).toEqual(['Vorschlag 2: eine andere Karte trägt diesen Titel schon'])
+    const ctx = await contextFor(BACKLOG)
+    const both = check([fix('R1'), create()], cards, ctx)
+    expect(both.rows.map(r => r.action)).toEqual(['rewrite'])
+    const reverse = check([create(), fix('R1')], cards, ctx)
+    expect(reverse.rows.map(r => r.action)).toEqual(['create'])
+  })
+
   test('ticks carry over by lower case, as apply.py compares them', () => {
     const card = oldCard('S1', { details: { etag: 'W/"S1d"', description: 'old', checklist: [{ title: 'Straße prüfen', isChecked: true }] } })
     const { rows } = check([fix('S1', { tasks: ['STRASSE prüfen'] })], [card])
