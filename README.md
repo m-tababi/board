@@ -50,7 +50,7 @@ The phases are `collecting`, `thinking`, `ready`, `applying` and `done` (or `fai
 
 ## Requirements
 
-- Claude Code with plugin hooks modules (the early-access function-hooks API). Tested on Claude Code 2.1.311. A surface that draws panes: the terminal (fullscreen) or the desktop app.
+- Claude Code with plugin hooks modules (the early-access function-hooks API). Its test kit ran on Claude Code 2.1.311; a live run on a real board is still to come. A surface that draws panes: the terminal (fullscreen) or the desktop app.
 - [Azure CLI](https://learn.microsoft.com/cli/azure/) (`az`), signed in (`az login`) with an account that can read and write the plan. The plugin calls `az rest` against Microsoft Graph.
 - [GitHub CLI](https://cli.github.com/) (`gh`), signed in (`gh auth login`), with read access to the configured repositories.
 - `python3` (3.8 or newer, standard library only) for the write script.
@@ -62,11 +62,14 @@ The phases are `collecting`, `thinking`, `ready`, `applying` and `done` (or `fai
 /plugin install board --marketplace m-tababi/board
 ```
 
-Then write your config (next section) and add this rule to `permissions.deny` in `~/.claude/settings.json`, so the main model cannot start the write script itself:
+Then write your config (next section) and add these rules to `permissions.deny` in `~/.claude/settings.json`. The first covers a clone in a folder named `board`, the second the installed copy (`~/.claude/plugins/cache/<marketplace>/board/<version>/apply.py`):
 
 ```json
-"Bash(*board/apply.py*)"
+"Bash(*board/apply.py*)",
+"Bash(*board/*/apply.py*)"
 ```
+
+Like the plugin's own guard they are a tripwire, not a boundary: they match the command's text, so a command that reaches the script without naming that path (a variable, a `cd` first, a renamed copy) gets past them.
 
 For development, `claude --plugin-dir /path/to/board` loads a clone for one session.
 
@@ -149,6 +152,8 @@ python -m pytest tests/        # the write script against a fake Graph and a mad
 claude plugin test .           # plugin logic, the pane and the run
 claude plugin validate .
 ```
+
+`tsconfig.json` extends `.claude-plugin/types/tsconfig.json`, which Claude Code writes when it loads the plugin from a folder; run `tsc -p .` after it has loaded the plugin once.
 
 ```
 .claude-plugin/
