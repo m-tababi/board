@@ -673,10 +673,10 @@ OLD_CHECKLIST = {
 class Rewrites(Base):
     """A rewrite puts an existing card into the create-backlog format."""
 
-    def old_card(self, **extra):
+    def old_card(self, title_override="cache pages (todo)", **extra):
         old = task(
             T1,
-            title="cache pages (todo)",
+            title=title_override,
             description="<!-- board-src: alpha/backlog.md#0123456789ab -->\n\n<!-- board -->\nSTATUS 2026-10-01: open · PR alpha#133\n<!-- /board -->\n\nOld free text\nwith lines",
             **extra,
         )
@@ -798,6 +798,16 @@ class Rewrites(Base):
         self.assertEqual(self.results(out), {1: "error", 2: "not_run"})
         self.assertIn("Titel und Priorität neu", out["rows"][0]["detail"])
         self.assertEqual(len(g.writes), 1)
+
+    def test_a_new_title_another_card_carries_is_skipped_before_any_write(self):
+        g = FakeGraph([self.old_card(), task(T2, title="cache the parsed pages")])
+        out = self.run_apply(g, [rewrite()], [1])
+        self.assertEqual(self.results(out), {1: "skipped"})
+        self.assertIn("andere Karte", out["rows"][0]["detail"])
+        self.assertEqual(g.writes, [])
+        # Its own old title does not count.
+        g = FakeGraph([self.old_card(title_override="Cache the Parsed Pages")])
+        self.assertEqual(self.results(self.run_apply(g, [rewrite()], [1])), {1: "ok"})
 
     def test_a_changed_card_is_skipped_whole(self):
         changed = self.old_card()

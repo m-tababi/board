@@ -583,6 +583,12 @@ def apply(
         key = ("create", n) if row["action"] == "create" else ("task", row["taskId"])
         groups.setdefault(key, []).append(row)
 
+    # The plan's titles, read once before the clock starts when a row creates or renames a card.
+    if any(rows[n]["action"] in ("create", "rewrite") for n in selected):
+        try:
+            _titles(graph, cfg, state)
+        except (RuntimeError, ValueError):
+            pass  # each row that needs the list reports it
     started = clock()
     stopped = None
     for (kind, _), group in groups.items():
@@ -598,7 +604,7 @@ def apply(
             if kind == "create":
                 _create(graph, group[0], today, state, report.note, outcome, cfg)
             else:
-                _update(graph, group, today, report.note, outcome, cfg)
+                _update(graph, group, today, report.note, outcome, cfg, state)
         except Stop as err:
             stopped = str(err)
         except Exception as err:  # noqa: BLE001 - anything unexpected after a write: stop, report what is known
@@ -610,7 +616,7 @@ def apply(
     return report.final(outcome, selected)
 
 
-def _update(graph, group, today, note, outcome, cfg):
+def _update(graph, group, today, note, outcome, cfg, state):
     task_id = group[0]["taskId"]
     # A rewrite writes both halves: title and priority with the task, the rest with the details.
     task_rows = [r for r in group if r["action"] in ("percent", "move", "assign", "rewrite")]
@@ -642,6 +648,16 @@ def _update(graph, group, today, note, outcome, cfg):
                     held.add(r["n"])
             for r in task_rows:
                 if r["action"] == "rewrite" and r["n"] not in held:
+                    try:
+                        others = {t for i, t in _titles(graph, cfg, state).items() if i != task_id}
+                    except (RuntimeError, ValueError) as err:
+                        note(r, "error", f"Kartenliste nicht lesbar: {err}")
+                        held.add(r["n"])
+                        continue
+                    if r["newTitle"].lower() in others:
+                        note(r, "skipped", "eine andere Karte trägt diesen Titel schon")
+                        held.add(r["n"])
+                        continue
                     _prepare_rewrite(graph, task_id, r, note, held, prepared)
             body, sent = {}, []
             for r in task_rows:
@@ -741,22 +757,28 @@ def _check_assignments(graph, task_id, before, assigned, owner):
         raise Stop(f"Zuweisung von {task_id} hat sich unerwartet geändert; Lauf angehalten")
 
 
+def _titles(graph, cfg, state):
+    """Task id -> lower-case title of every card of the plan, read once per run (and kept up to date)."""
+    if state["titles"] is None:
+        titles = {}
+        path = f"/planner/plans/{cfg.plan_id}/tasks"
+        while path:
+            page = graph.get(path)
+            titles.update({str(t.get("id", "")): str(t.get("title", "")).strip().lower() for t in page.get("value", [])})
+            following = page.get("@odata.nextLink") or ""
+            path = following[len(GRAPH) :] if following.startswith(GRAPH + "/") else None
+        state["titles"] = titles
+    return state["titles"]
+
+
 def _create(graph, row, today, state, note, outcome, cfg):
     title = row["title"]
     try:
-        if state["titles"] is None:
-            titles = set()
-            path = f"/planner/plans/{cfg.plan_id}/tasks"
-            while path:
-                page = graph.get(path)
-                titles |= {str(t.get("title", "")).strip().lower() for t in page.get("value", [])}
-                following = page.get("@odata.nextLink") or ""
-                path = following[len(GRAPH) :] if following.startswith(GRAPH + "/") else None
-            state["titles"] = titles
+        titles = _titles(graph, cfg, state)
     except (RuntimeError, ValueError) as err:
         note(row, "error", f"Kartenliste nicht lesbar: {err}")
         return
-    if title.lower() in state["titles"]:
+    if title.lower() in titles.values():
         note(row, "skipped", "Karte mit diesem Titel gibt es schon")
         return
 
@@ -766,12 +788,13 @@ def _create(graph, row, today, state, note, outcome, cfg):
         note(row, "error", out)
         return
     outcome["written"] = True
-    state["titles"].add(title.lower())
     try:
         created = json.loads(out)
     except ValueError:
         created = None
     new_id = created.get("id") if isinstance(created, dict) else None
+    # The new title counts for the rows after it, under the new id or, without one, a stand-in key.
+    titles[new_id if isinstance(new_id, str) else f"row-{row['n']}"] = title.lower()
     if not isinstance(new_id, str) or not ID_RE.match(new_id):
         note(row, "error", "angelegt, aber ohne gültige ID zurückgemeldet – auf dem Board prüfen")
         raise Stop("Neue Karte ohne gültige ID zurückgemeldet; Lauf angehalten")
