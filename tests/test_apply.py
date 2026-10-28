@@ -831,6 +831,13 @@ class Rewrites(Base):
         self.assertEqual(self.results(out), {1: "ok", 2: "skipped"})
         self.assertEqual([w[0] for w in g.writes], ["patch-task", "patch-details"])
 
+    def test_a_rewrite_that_does_not_go_keeps_the_old_title_taken(self):
+        held = self.old_card(title_override="Keep the Old Title", assignments=[OTHER])
+        g = FakeGraph([held])
+        out = self.run_apply(g, [rewrite(), card(n=2, title="Keep the Old Title")], [1, 2])
+        self.assertEqual(self.results(out), {1: "skipped", 2: "skipped"})
+        self.assertEqual(g.writes, [])
+
     def test_a_changed_card_is_skipped_whole(self):
         changed = self.old_card()
         changed["etag"] = 'W/"someone-else"'

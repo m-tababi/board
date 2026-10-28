@@ -659,9 +659,6 @@ def _update(graph, group, today, note, outcome, cfg, state):
                         held.add(r["n"])
                         continue
                     _prepare_rewrite(graph, task_id, r, note, held, prepared)
-                    if r["n"] not in held:
-                        # The new title counts for the rows after it.
-                        state["titles"][task_id] = r["newTitle"].lower()
             body, sent = {}, []
             for r in task_rows:
                 if r["action"] == "percent":
@@ -695,6 +692,8 @@ def _update(graph, group, today, note, outcome, cfg, state):
                 result, detail = graph.write("patch", f"/planner/tasks/{task_id}", body, task_rows[0]["etag"])
                 for r in sent:
                     if r["action"] == "rewrite" and result == "ok":
+                        # The new title counts for the rows after it, once the card carries it.
+                        state["titles"][task_id] = r["newTitle"].lower()
                         continue
                     note(r, {"ok": "ok", "conflict": "skipped", "error": "error"}[result], "" if result == "ok" else detail)
                     held.add(r["n"])
