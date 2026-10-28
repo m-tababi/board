@@ -61,7 +61,7 @@ const MODEL_TIMEOUT_MS = 600_000
 // apply.py starts no card after 120 s and cuts each az call at 30 s: its slowest
 // card ends by 270 s, inside this limit.
 const APPLY_TIMEOUT_MS = 330_000
-const MAX_TOKENS = 16_000
+const MAX_TOKENS = 32_000
 const DETAILS_AT_ONCE = 6
 const TOAST_MS = 8000
 const RUN_FILE_REFUSAL =

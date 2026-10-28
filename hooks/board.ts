@@ -12,8 +12,6 @@ export const MAX_CREATE_TITLE = 70
 // New cards and pulls into the Sprint Backlog per run.
 export const MAX_CREATES = 15
 export const MAX_SPRINT = 3
-// Existing cards brought into the create-backlog format per run.
-export const MAX_REWRITES = 15
 export const DEFAULT_SKILL_PATH = '~/.claude/skills/create-backlog/SKILL.md'
 // The create-backlog format, as far as a machine can check it (apply.py checks the same).
 export const PRIORITIES = ['Urgent', 'Important', 'Medium', 'Low'] as const
@@ -434,9 +432,8 @@ export function systemPrompt(cfg: Config, skill: string | null, hasNextSteps: bo
       : `create: a new card only for an open entry of a backlog file that no card covers: no card has its title (check the done titles too) and no open card carries its <!-- board-src: … --> line. Never invent work: every new card belongs to exactly one backlog entry, and its content comes only from that entry's text. At most ${MAX_CREATES}. The card follows the create-backlog skill below exactly: English, its title rules, a user story "As a developer, I want to … so that ….", priority one of ${PRIORITIES.join(', ')}, tasks, 3 to 5 acceptance criteria. Step 6 of the skill (writing to backlog.md) does not apply: you only fill the fields. The card goes to backlog, unassigned. source.file is the backlog file's name as given before its bracket (e.g. ${cfg.backlogSources[0] === undefined ? 'repo/backlog.md' : `${cfg.backlogSources[0].repo}/${cfg.backlogSources[0].path}`}); source.heading is the entry's heading exactly as it stands after "## ".
 The user story is exactly "${STORY_TEMPLATE}": it starts with the words "As a developer, I want to " (never "I want the", "I want a" or "I want X to"), then "so that", and it ends with a full stop. A full card, as the skill's example reads:
 ${JSON.stringify(EXAMPLE_CARD)}
-Before you answer, check every create and rewrite against this template field by field: title (plain English, no date, no backticks or markdown), priority, the exact story form, 1 or more tasks, 3 to 5 acceptance criteria. A row that does not fit is dropped unseen; fix it or leave it out.
+Before you answer, check every create against this template field by field: title (plain English, no date, no backticks or markdown), priority, the exact story form, 1 or more tasks, 3 to 5 acceptance criteria. A row that does not fit is dropped unseen; fix it or leave it out.
 source: an open card that already covers a backlog entry but has no <!-- board-src: … --> line at the top of its description -> propose source with that entry, instead of a create.
-rewrite: an open card whose isSkillFormat is false is brought into the create-backlog format: give title, priority, userStory, tasks and acceptanceCriteria for it, taken only from the card's own title, description and checklist (and the backlog entry its board-src line names); keep its meaning, invent no work. Keep a task's wording when it is still a task of the card, so its tick carries over. Never for a card assigned to someone else, with isOwnCard false, or tied to a PR whose author is not ${cfg.ownerLogin}. At most ${MAX_REWRITES}. Check every rewrite against the template exactly like a create. The card's title and priority are replaced, its description gets the template body on top; everything the old description held stays below it word for word under "Previous notes:", ticked checklist items stay, its <!-- board-src --> line and <!-- board --> block stay. No rewrite for a card with isDescriptionCut, and ticked items no task repeats count against the checklist's 20.
 
 <create-backlog-skill>
 ${skill}
@@ -470,12 +467,11 @@ Allowed actions, nothing else (no deletion, no renames, no free text on the boar
 - {"action":"assign","taskId":ID,"evidence":E}
 - {"action":"marker","taskId":ID,"marker":{"status":S,"repo":${repos.map(r => JSON.stringify(r)).join('|')},"pr":N,"ref":R},"evidence":E}
 - {"action":"source","taskId":ID,"source":{"file":F,"heading":H},"evidence":E}
-- {"action":"rewrite","taskId":ID,"title":T,"priority":P,"userStory":U,"tasks":[...],"acceptanceCriteria":[...],"evidence":E}
 - {"action":"create","title":T,"priority":P,"userStory":U,"tasks":[...],"acceptanceCriteria":[...],"source":{"file":F,"heading":H},"evidence":E}
-S is one of ${statusesOf(cfg).join(', ')}. In a marker, repo and pr come together or not at all; ref is a repository path, optionally with :line or :from-to (e.g. backlog.md:1869); both optional. One row per action; at most one row per card and field (marker, source and rewrite all write the description). ID is a taskId exactly as given. Every text field is one line.
+S is one of ${statusesOf(cfg).join(', ')}. In a marker, repo and pr come together or not at all; ref is a repository path, optionally with :line or :from-to (e.g. backlog.md:1869); both optional. One row per action; at most one row per card and field (marker and source both write the description). ID is a taskId exactly as given. Every text field is one line.
 E (evidence) is German, at most 200 characters, and names the source: file:line, PR number or changelog version.
 
-At most ${MAX_ROWS} rows; order them by importance. Answer with JSON only, no prose and no code fence: {"rows":[...]}, each row on its own line. Leave out a row you do not mean; never write a placeholder row. An empty list is a valid answer.${own}`
+At most ${MAX_ROWS} rows; order them by importance. Answer with JSON only, no prose and no code fence: {"rows":[...]}, each row on its own line, rows separated by commas. Leave out a row you do not mean; never write a placeholder row. An empty list is a valid answer.${own}`
 }
 
 function cutDescription(text: string): string {
@@ -828,7 +824,6 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
   const sources = new Set(cards.map(c => sourceOf(c.details?.description ?? '')).filter((x): x is string => x !== null))
   let creates = 0
   let sprints = 0
-  let rewrites = 0
   // Titles the run's creates and rewrites give out.
   const runTitles = new Set<string>()
 
@@ -846,6 +841,10 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
     const action = r.action as Action
     if (!ACTIONS.includes(action)) {
       drop(at, r, `Aktion nicht erlaubt (${clean(r.action, 40)})`)
+      continue
+    }
+    if (action === 'rewrite') {
+      drop(at, r, `neu fassen ist abgeschaltet`)
       continue
     }
     const extra = Object.keys(r).filter(k => !MODEL_KEYS[action].includes(k))
@@ -989,66 +988,6 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
       }
       row = { ...base, action }
       assigns.push({ row, card })
-    } else if (action === 'rewrite') {
-      // Only the owner's or a free card, not tied to someone else's PR, not yet in the format.
-      if (!ctx.hasSkill) {
-        drop(at, r, `neu fassen gesperrt (Skill-Datei create-backlog nicht lesbar)`)
-        continue
-      }
-      if (card.createdBy !== cfg.ownerId) {
-        drop(at, r, `Karte hat jemand anderes angelegt`)
-        continue
-      }
-      if (card.assigned === 'someone_else') {
-        drop(at, r, `Karte ist jemand anderem zugewiesen`)
-        continue
-      }
-      if (foreignPr(prOfCard(card), prs, cfg)) {
-        drop(at, r, `Karte gehört zu fremdem PR`)
-        continue
-      }
-      if (isSkillFormat(card)) {
-        drop(at, r, `Karte ist schon im Skill-Format`)
-        continue
-      }
-      if (card.details.description.length > DESCRIPTION_CAP) {
-        drop(at, r, `Beschreibung länger als ${DESCRIPTION_CAP} Zeichen, Opus las sie nicht ganz`)
-        continue
-      }
-      const wrong = cardFieldsError(r)
-      if (wrong !== null) {
-        drop(at, r, `${wrong}`)
-        continue
-      }
-      // Ticked old items no task repeats stay; with the tasks they must fit the checklist's twenty.
-      const newTasks = new Set((r.tasks as string[]).map(t => t.trim().toLowerCase()))
-      const kept = card.details.checklist.filter(i => i.isChecked && !newTasks.has(i.title.trim().toLowerCase())).length
-      if (kept > 0 && Math.min((r.tasks as string[]).length, 20) + kept > 20) {
-        drop(at, r, `${kept} abgehakte alte Einträge bleiben, mit den Tasks über 20 in der Checkliste`)
-        continue
-      }
-      const newTitle = r.title as string
-      if (cards.some(c => c.id !== card.id && c.title.trim().toLowerCase() === newTitle.toLowerCase()) || runTitles.has(newTitle.toLowerCase())) {
-        drop(at, r, `eine andere Karte trägt diesen Titel schon`)
-        continue
-      }
-      if (rewrites >= MAX_REWRITES) {
-        drop(at, r, `mehr als ${MAX_REWRITES} neu gefasste Karten`)
-        continue
-      }
-      rewrites += 1
-      // The new title counts for the rows after it, as a create's does.
-      titles.add(newTitle.toLowerCase())
-      runTitles.add(newTitle.toLowerCase())
-      row = {
-        ...base,
-        action,
-        newTitle,
-        priority: r.priority as (typeof PRIORITIES)[number],
-        userStory: r.userStory as string,
-        tasks: [...(r.tasks as string[])],
-        acceptanceCriteria: [...(r.acceptanceCriteria as string[])],
-      }
     } else if (action === 'source') {
       if (sourceOf(card.details.description) !== null) {
         drop(at, r, `Karte hat schon eine Quellzeile`)
