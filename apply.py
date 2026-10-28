@@ -41,12 +41,12 @@ BASE_STATUSES = {
 }
 PERCENTS = (0, 50, 100)
 MAX_ROWS = 30
-MAX_CREATE_TITLE = 70
+MAX_CREATE_TITLE = 255
 # A new card in the create-backlog format, mapped to Planner as post-backlog does.
 PRIORITIES = {"Urgent": 1, "Important": 3, "Medium": 5, "Low": 9}
 STORY_RE = re.compile(r"^As a developer, I want to .{5,} so that .{5,}\.$")
 # Title characters Planner or Markdown would read as markup.
-TITLE_MARKUP_RE = re.compile(r"[`*_\[]|\]\(")
+TITLE_MARKUP_RE = re.compile(r"[`*\[]|\]\(")
 # A heading's date prefix ("2026-10-20 — …"): post-backlog drops it from the title.
 DATE_TITLE_RE = re.compile(r"^\s*\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}\s*[—–]")
 MAX_TASKS = 40

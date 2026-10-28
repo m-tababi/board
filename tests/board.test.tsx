@@ -455,14 +455,12 @@ describe('proposal check', () => {
     expect(markerFields({ status: 'side_project' })).toBe('side project')
   })
 
-  test('a new title is at most 70 characters, so the table shows all of it', async () => {
+  test('titles and tasks follow the skills: a code name may stand in the title, a long task is cut to 97 characters and ...', async () => {
     const ctx = await contextFor(BACKLOG)
-    const { rows, dropped } = check(
-      [create({ title: 'A'.repeat(71) }), create({ title: 'B'.repeat(70) })],
-      ctx,
-    )
-    expect(rows.map(r => r.title)).toEqual(['B'.repeat(70)])
-    expect(dropped).toHaveLength(1)
+    const { rows, dropped } = check([create({ title: 'Retire the MINERU_DEVICE_MODE Pattern', tasks: ['t'.repeat(130)] })], ctx)
+    expect(dropped).toHaveLength(0)
+    expect(rows[0]?.title).toBe('Retire the MINERU_DEVICE_MODE Pattern')
+    expect('tasks' in rows[0]! ? rows[0].tasks : []).toEqual([`${'t'.repeat(97)}...`])
   })
 
   test('assign only for a card in In Progress or moved there; no user id from a card title', () => {

@@ -8,7 +8,7 @@ export const PYTHON = '/usr/bin/python3'
 export const GH = '/usr/bin/gh'
 export const MAX_ROWS = 30
 // A new card's title is shown whole in the table, so it is short.
-export const MAX_CREATE_TITLE = 70
+export const MAX_CREATE_TITLE = 255
 // New cards and pulls into the Sprint Backlog per run.
 export const MAX_CREATES = 15
 export const MAX_SPRINT = 3
@@ -16,7 +16,7 @@ export const DEFAULT_SKILL_PATH = '~/.claude/skills/create-backlog/SKILL.md'
 // The create-backlog format, as far as a machine can check it (apply.py checks the same).
 export const PRIORITIES = ['Urgent', 'Important', 'Medium', 'Low'] as const
 const STORY_RE = /^As a developer, I want to .{5,} so that .{5,}\.$/
-const TITLE_MARKUP_RE = /[`*_[]|\]\(/
+const TITLE_MARKUP_RE = /[`*[]|\]\(/
 // A heading's date prefix ("2026-10-20 — …"): post-backlog drops it from the title.
 const DATE_TITLE_RE = /^\s*\d{4}-\d{2}-\d{2}|\d{4}-\d{2}-\d{2}\s*[—–]/
 const MAX_TASKS = 40
@@ -432,7 +432,7 @@ export function systemPrompt(cfg: Config, skill: string | null, hasNextSteps: bo
       : `create: a new card only for an open entry of a backlog file that no card covers: no card has its title (check the done titles too) and no open card carries its <!-- board-src: … --> line. Never invent work: every new card belongs to exactly one backlog entry, and its content comes only from that entry's text. At most ${MAX_CREATES}. The card follows the create-backlog skill below exactly: English, its title rules, a user story "As a developer, I want to … so that ….", priority one of ${PRIORITIES.join(', ')}, tasks, 3 to 5 acceptance criteria. Step 6 of the skill (writing to backlog.md) does not apply: you only fill the fields. The card goes to backlog, unassigned. source.file is the backlog file's name as given before its bracket (e.g. ${cfg.backlogSources[0] === undefined ? 'repo/backlog.md' : `${cfg.backlogSources[0].repo}/${cfg.backlogSources[0].path}`}); source.heading is the entry's heading exactly as it stands after "## ".
 The user story is exactly "${STORY_TEMPLATE}": it starts with the words "As a developer, I want to " (never "I want the", "I want a" or "I want X to"), then "so that", and it ends with a full stop. A full card, as the skill's example reads:
 ${JSON.stringify(EXAMPLE_CARD)}
-Before you answer, check every create against this template field by field: title (plain English, 3 to ${MAX_CREATE_TITLE} characters, no date, none of \` * _ [ ] – write a code name like MINERU_DEVICE_MODE in words), priority, the exact story form, 1 to ${MAX_TASKS} tasks of at most 100 characters each, 3 to 5 acceptance criteria of at most 200 characters each. Count the characters; shorten rather than exceed. A row that does not fit is dropped unseen; fix it or leave it out.
+Before you answer, check every create against this template field by field: title (plain English, no date, no backticks or markdown), priority, the exact story form, 1 or more tasks, 3 to 5 acceptance criteria. A row that does not fit is dropped unseen; fix it or leave it out.
 source: an open card that already covers a backlog entry but has no <!-- board-src: … --> line at the top of its description -> propose source with that entry, instead of a create.
 
 <create-backlog-skill>
@@ -864,6 +864,8 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
         drop(at, r, `neue Karten gesperrt (Skill-Datei create-backlog nicht lesbar)`)
         continue
       }
+      // A task past Planner's 100 characters is cut as the post-backlog skill does.
+      if (Array.isArray(r.tasks)) r.tasks = r.tasks.map(t => (typeof t === 'string' && t.length > 100 ? `${t.slice(0, 97)}...` : t))
       const wrong = cardFieldsError(r)
       if (wrong !== null) {
         drop(at, r, `${wrong}`)

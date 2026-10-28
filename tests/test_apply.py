@@ -293,7 +293,7 @@ class Refusals(Base):
             row(1, "marker", marker={**MARKER, "pr": "133"}),
             row(1, "marker", marker={**MARKER, "note": "x"}),
             card(title="Bad\x1b[31m title"),
-            card(title="x" * 71),
+            card(title="x" * 256),
             card(title=" Padded title"),
         ]
         for bad in cases:
@@ -595,7 +595,6 @@ class NewCards(Base):
             card(title="Cache the `parsed` Pages"),
             card(title="Cache the *Parsed* Pages"),
             card(title="Cache [the](x) Pages"),
-            card(title="Cache_the_Pages"),
             card(title="2026-10-20 — Cache the Parsed Pages"),
             card(tasks=["Add <!-- board --> here"]),
             card(acceptanceCriteria=CRITERIA[:2] + ["Ends <!-- /board -->"]),
