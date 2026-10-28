@@ -1013,6 +1013,12 @@ describe('the stand files', () => {
     ])
     expect(tied.rows.map(r => r.action)).toEqual(['marker'])
     expect(tied.dropped).toEqual(['Standdatei „Extraktion: Card S1“: Karte gehört zu fremdem PR'])
+    // The same when the marker already stands on the card and the model proposes none.
+    const held = await card('S1', CACHE_AT, 'backlog')
+    held.details = { etag: 'W/"S1d"', description: `<!-- board-src: alpha/backlog.md#${await sourceKey(CACHE_AT)} -->\n\n<!-- board -->\nSTATUS 2026-10-01: open · PR alpha#174\n<!-- /board -->\n\nbody`, checklist: [] }
+    const stored = await run([alpha(stand([], ['- Cache the Parsed Pages']))], [held])
+    expect(stored.rows).toEqual([])
+    expect(stored.dropped).toEqual(['Standdatei „Extraktion: Card S1“: Karte gehört zu fremdem PR'])
   })
 
   test('W9: a stand file unreadable or without a section moves nothing for its source and says so; the other source goes on', async () => {

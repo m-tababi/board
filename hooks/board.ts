@@ -1067,7 +1067,7 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
       drop(`Zuweisung „${clean(hit.card.title, 60)}“`, { action: 'assign', taskId: hit.card.id, evidence: hit.row.evidence }, 'Karte nicht in In Progress (Backlog/Sprint bleiben frei)')
       return false
     }
-    if (hit !== undefined && foreignPr(markers.get(hit.card.id), prs, cfg)) {
+    if (hit !== undefined && foreignPr(markers.get(hit.card.id) ?? prOfCard(hit.card), prs, cfg)) {
       drop(`Zuweisung „${clean(hit.card.title, 60)}“`, { action: 'assign', taskId: hit.card.id, evidence: hit.row.evidence }, 'Karte gehört zu fremdem PR')
       return false
     }
@@ -1081,7 +1081,7 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
     const details = card.details
     if (details === undefined) continue
     // A card tied to someone else's PR is not started, as the model may not start it either.
-    if (m.bucket === 'in_progress' && foreignPr(markers.get(card.id), prs, cfg)) {
+    if (m.bucket === 'in_progress' && foreignPr(markers.get(card.id) ?? prOfCard(card), prs, cfg)) {
       drop(`Standdatei „${clean(card.title, 60)}“`, { action: 'move', taskId: card.id, bucket: m.bucket, evidence: m.evidence }, 'Karte gehört zu fremdem PR')
       continue
     }
