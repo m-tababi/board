@@ -136,8 +136,9 @@ async function readPrs($: EngineInterface, cfg: Config, repo: string): Promise<P
   return (JSON.parse(out) as unknown[]).map(raw => prFrom(repo, raw)).filter((p): p is Pr => p !== null)
 }
 
-// A file at the branch head on GitHub: no fetch into a local clone.
-async function readRepoFile($: EngineInterface, cfg: Config, file: RepoFile): Promise<string> {
+// A file at the branch head on GitHub (no fetch into a local clone), or its working copy when the config names one.
+async function readRepoFile($: EngineInterface, cfg: Config, file: RepoFile, homeDir: string): Promise<string> {
+  if (file.local !== undefined) return $.fs.read(local(file.local, homeDir))
   const slug = cfg.repos[file.repo] ?? ''
   return exec($, [cfg.ghPath, 'api', '-H', 'Accept: application/vnd.github.raw', `repos/${slug}/contents/${file.path}?ref=${file.ref}`], GH_TIMEOUT_MS)
 }
@@ -168,14 +169,14 @@ async function collect($: EngineInterface, cfg: Config, today: string, homeDir: 
       await counted({ prs: lists.flat().length })
       return lists
     }),
-    Promise.all(cfg.backlogSources.map(file => readRepoFile($, cfg, file))).then(async texts => {
+    Promise.all(cfg.backlogSources.map(file => readRepoFile($, cfg, file, homeDir))).then(async texts => {
       await counted({ backlog: entryCount(texts) })
       return texts
     }),
-    cfg.changelog === undefined ? Promise.resolve(null) : readRepoFile($, cfg, cfg.changelog),
+    cfg.changelog === undefined ? Promise.resolve(null) : readRepoFile($, cfg, cfg.changelog, homeDir),
   ])
   const files = cfg.backlogSources.map((file, i) => ({
-    name: `${file.repo}/${file.path} (${file.ref}; DONE sections as heading only)`,
+    name: `${file.repo}/${file.path} (${file.local === undefined ? file.ref : 'working copy'}; DONE sections as heading only)`,
     text: backlogDigest(backlogs[i] ?? ''),
   }))
   if (cfg.changelog !== undefined && changelog !== null) {

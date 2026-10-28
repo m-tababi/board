@@ -62,7 +62,8 @@ const CONTROL_RE = new RegExp('[\\x00-\\x1f\\x7f-\\x9f\\u061c\\u180e\\u200b-\\u2
 
 // ---- the config ---------------------------------------------------------
 
-export type RepoFile = { repo: string; path: string; ref: string }
+// `local`: read this working copy instead of the branch head on GitHub (a gitignored backlog has no other).
+export type RepoFile = { repo: string; path: string; ref: string; local?: string }
 
 /** The owner's config (~/.claude/board/config.json), checked; apply.py reads the same file. */
 export type Config = {
@@ -106,7 +107,8 @@ function repoFile(value: unknown, repos: Record<string, string>): RepoFile | nul
   if (typeof value !== 'object' || value === null) return null
   const f = value as Record<string, unknown>
   const isOk =
-    Object.keys(f).every(k => ['repo', 'path', 'ref'].includes(k)) &&
+    Object.keys(f).every(k => ['repo', 'path', 'ref', 'local'].includes(k)) &&
+    (f.local === undefined || (typeof f.local === 'string' && f.local.length > 0 && !f.local.includes('\n') && !f.local.includes('..'))) &&
     typeof f.repo === 'string' &&
     f.repo in repos &&
     typeof f.path === 'string' &&
@@ -115,7 +117,10 @@ function repoFile(value: unknown, repos: Record<string, string>): RepoFile | nul
     typeof f.ref === 'string' &&
     REPO_PATH_RE.test(f.ref) &&
     !f.ref.includes('..')
-  return isOk ? { repo: f.repo as string, path: f.path as string, ref: f.ref as string } : null
+  if (!isOk) return null
+  const file: RepoFile = { repo: f.repo as string, path: f.path as string, ref: f.ref as string }
+  if (typeof f.local === 'string') file.local = f.local
+  return file
 }
 
 /** The config from its file's text, or why it does not hold (the same rules apply.py checks, and the mod's own). */
@@ -429,7 +434,7 @@ export function systemPrompt(cfg: Config, skill: string | null, hasNextSteps: bo
   const create =
     skill === null
       ? 'create: not available in this run (the create-backlog skill could not be read); propose no create.'
-      : `create: a new card only for an open entry of a backlog file that no card covers: no card has its title (check the done titles too) and no open card carries its <!-- board-src: … --> line. Never invent work: every new card belongs to exactly one backlog entry, and its content comes only from that entry's text. At most ${MAX_CREATES}. The card follows the create-backlog skill below exactly: English, its title rules, a user story "As a developer, I want to … so that ….", priority one of ${PRIORITIES.join(', ')}, tasks, 3 to 5 acceptance criteria. Step 6 of the skill (writing to backlog.md) does not apply: you only fill the fields. The card goes to backlog, unassigned. source.file is the backlog file's name as given before its bracket (e.g. ${cfg.backlogSources[0] === undefined ? 'repo/backlog.md' : `${cfg.backlogSources[0].repo}/${cfg.backlogSources[0].path}`}); source.heading is the entry's heading exactly as it stands after "## ".
+      : `create: a new card only for an open entry of a backlog file that no card covers: no card has its title (check the done titles too) and no open card carries its <!-- board-src: … --> line. Never invent work: every new card belongs to exactly one backlog entry, and its content comes only from that entry's text. At most ${MAX_CREATES}. The card follows the create-backlog skill below exactly: English, its title rules, a user story "As a developer, I want to … so that ….", priority one of ${PRIORITIES.join(', ')}, tasks, 3 to 5 acceptance criteria. Step 6 of the skill (writing to backlog.md) does not apply: you only fill the fields. The card goes to backlog, unassigned. doneTasks (optional) lists, word for word as in tasks, the tasks the entry marks done with - [x]; the card starts with them ticked. source.file is the backlog file's name as given before its bracket (e.g. ${cfg.backlogSources[0] === undefined ? 'repo/backlog.md' : `${cfg.backlogSources[0].repo}/${cfg.backlogSources[0].path}`}); source.heading is the entry's heading exactly as it stands after "## ".
 The user story is exactly "${STORY_TEMPLATE}": it starts with the words "As a developer, I want to " (never "I want the", "I want a" or "I want X to"), then "so that", and it ends with a full stop. A full card, as the skill's example reads:
 ${JSON.stringify(EXAMPLE_CARD)}
 Before you answer, check every create against this template field by field: title (plain English, no date, no backticks or markdown), priority, the exact story form, 1 or more tasks, 3 to 5 acceptance criteria. A row that does not fit is dropped unseen; fix it or leave it out.
@@ -467,7 +472,7 @@ Allowed actions, nothing else (no deletion, no renames, no free text on the boar
 - {"action":"assign","taskId":ID,"evidence":E}
 - {"action":"marker","taskId":ID,"marker":{"status":S,"repo":${repos.map(r => JSON.stringify(r)).join('|')},"pr":N,"ref":R},"evidence":E}
 - {"action":"source","taskId":ID,"source":{"file":F,"heading":H},"evidence":E}
-- {"action":"create","title":T,"priority":P,"userStory":U,"tasks":[...],"acceptanceCriteria":[...],"source":{"file":F,"heading":H},"evidence":E}
+- {"action":"create","title":T,"priority":P,"userStory":U,"tasks":[...],"doneTasks":[...],"acceptanceCriteria":[...],"source":{"file":F,"heading":H},"evidence":E}
 S is one of ${statusesOf(cfg).join(', ')}. In a marker, repo and pr come together or not at all; ref is a repository path, optionally with :line or :from-to (e.g. backlog.md:1869); both optional. One row per action; at most one row per card and field (marker and source both write the description). ID is a taskId exactly as given. Every text field is one line.
 E (evidence) is German, at most 200 characters, and names the source: file:line, PR number or changelog version.
 
@@ -590,6 +595,8 @@ export type Row =
       priority: (typeof PRIORITIES)[number]
       userStory: string
       tasks: string[]
+      // Tasks ticked in the backlog entry; the card starts with them ticked.
+      doneTasks?: string[]
       acceptanceCriteria: string[]
       source: Source
       evidence: string
@@ -634,7 +641,7 @@ const MODEL_KEYS: Record<Action, string[]> = {
   marker: ['action', 'taskId', 'marker', 'evidence'],
   source: ['action', 'taskId', 'source', 'evidence'],
   rewrite: ['action', 'taskId', 'title', 'priority', 'userStory', 'tasks', 'acceptanceCriteria', 'evidence'],
-  create: ['action', 'title', 'priority', 'userStory', 'tasks', 'acceptanceCriteria', 'source', 'evidence'],
+  create: ['action', 'title', 'priority', 'userStory', 'tasks', 'doneTasks', 'acceptanceCriteria', 'source', 'evidence'],
 }
 const FIELD: Record<Exclude<Action, 'create'>, string> = { percent: 'percent', move: 'bucket', assign: 'assign', marker: 'description', source: 'description', rewrite: 'description' }
 
@@ -865,10 +872,17 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
         continue
       }
       // A task past Planner's 100 characters is cut as the post-backlog skill does.
-      if (Array.isArray(r.tasks)) r.tasks = r.tasks.map(t => (typeof t === 'string' && t.length > 100 ? `${t.slice(0, 97)}...` : t))
+      const cut = (t: unknown) => (typeof t === 'string' && t.length > 100 ? `${t.slice(0, 97)}...` : t)
+      if (Array.isArray(r.tasks)) r.tasks = r.tasks.map(cut)
+      if (Array.isArray(r.doneTasks)) r.doneTasks = r.doneTasks.map(cut)
       const wrong = cardFieldsError(r)
       if (wrong !== null) {
         drop(at, r, `${wrong}`)
+        continue
+      }
+      const taskKeys = new Set((r.tasks as string[]).map(t => t.trim().toLowerCase()))
+      if (r.doneTasks !== undefined && (!Array.isArray(r.doneTasks) || !r.doneTasks.every(t => typeof t === 'string' && taskKeys.has(t.trim().toLowerCase())))) {
+        drop(at, r, `doneTasks nur wörtlich aus tasks`)
         continue
       }
       const title = r.title as string
@@ -901,6 +915,7 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
         priority: r.priority as (typeof PRIORITIES)[number],
         userStory: r.userStory as string,
         tasks: [...(r.tasks as string[])],
+        ...(Array.isArray(r.doneTasks) && r.doneTasks.length > 0 ? { doneTasks: [...(r.doneTasks as string[])] } : {}),
         acceptanceCriteria: [...(r.acceptanceCriteria as string[])],
         source: { file: src.file, heading: src.heading },
         evidence,
@@ -1159,7 +1174,7 @@ function cardLines(row: Extract<Row, { action: 'create' }>, entry: Entry | undef
     `  Priority: ${row.priority}`,
     `  ${clean(row.userStory, 300)}`,
     '  Tasks:',
-    ...row.tasks.map(t => `  - ${clean(t, 100)}`),
+    ...row.tasks.map(t => `  - [${(row.doneTasks ?? []).some(d => d.trim().toLowerCase() === t.trim().toLowerCase()) ? 'x' : ' '}] ${clean(t, 100)}`),
     '  Acceptance Criteria:',
     ...row.acceptanceCriteria.map(c => `  - ${clean(c, 200)}`),
   ]

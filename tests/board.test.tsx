@@ -455,6 +455,17 @@ describe('proposal check', () => {
     expect(markerFields({ status: 'side_project' })).toBe('side project')
   })
 
+  test('doneTasks, word for word from tasks and cut like them, start ticked; anything else drops the card', async () => {
+    const ctx = await contextFor(BACKLOG)
+    const long = 'd'.repeat(130)
+    const kept = check([create({ tasks: ['First task', long], doneTasks: ['first task', long] })], ctx)
+    expect(kept.dropped).toHaveLength(0)
+    expect(kept.rows[0] !== undefined && 'doneTasks' in kept.rows[0] ? kept.rows[0].doneTasks : []).toEqual(['first task', `${'d'.repeat(97)}...`])
+    const gone = check([create({ doneTasks: ['A task the card does not have'] })], ctx)
+    expect(gone.rows).toHaveLength(0)
+    expect(gone.dropped[0]).toContain('doneTasks nur wörtlich aus tasks')
+  })
+
   test('titles and tasks follow the skills: a code name may stand in the title, a long task is cut to 97 characters and ...', async () => {
     const ctx = await contextFor(BACKLOG)
     const { rows, dropped } = check([create({ title: 'Retire the MINERU_DEVICE_MODE Pattern', tasks: ['t'.repeat(130)] })], ctx)
@@ -1376,7 +1387,7 @@ describe('a board run in the pane', () => {
     expect(open).toContain('A rerun should skip the parser.')
     expect(open).toContain('Priority: Important')
     expect(open).toContain(STORY)
-    expect(open).toContain('- Key entries by the input hash')
+    expect(open).toContain('- [ ] Key entries by the input hash')
     expect(open).toContain('- The cache folder is documented')
     const document = JSON.parse(seen.files.get(`${DIR}/proposals-${stamped}.json`) ?? '{}')
     expect(document.rows[0].source).toEqual({ file: 'alpha/backlog.md', heading: CACHE })
@@ -1393,6 +1404,19 @@ describe('a board run in the pane', () => {
     expect(ready).toContain('Neue Karten gesperrt: Skill-Datei SKILL.md nicht lesbar.')
     expect(seen.prompts[0]?.system).toContain('create: not available in this run')
     expect(ready).toContain('neue Karten gesperrt')
+  })
+
+  test('a backlog source with a local path is read from that file, not from GitHub', async ($, on) => {
+    const config = { ...CONFIG_FILE, backlogSources: [{ repo: 'alpha', path: 'backlog.md', ref: 'main', local: '~/work/backlog.md' }] }
+    const seen = world(on, { reply: '{"rows":[]}', config: JSON.stringify(config) })
+    seen.files.set(`${HOME}/work/backlog.md`, '## 2026-10-01 — Local Entry\n\n- [x] Ticked task\n- [ ] Open task\n')
+    await start($, false)
+    await board($)
+    const view = await pane($)
+    await until(seen, view, 'Keine Änderungen vorgeschlagen – Board passt zum Stand.')
+    expect(seen.prompts[0]?.prompt).toContain('alpha/backlog.md (working copy;')
+    expect(seen.prompts[0]?.prompt).toContain('- [x] Ticked task')
+    expect(seen.runs.some(r => r.join(' ').includes('contents/backlog.md'))).toBe(false)
   })
 
   test('an empty proposal stamps the run and shows no rows', async ($, on) => {

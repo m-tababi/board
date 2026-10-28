@@ -92,7 +92,7 @@ ACTION_KEYS = {
     "source": TASK_KEYS | {"source"},
     # An existing card in the create-backlog format: title, priority, description and checklist anew.
     "rewrite": TASK_KEYS | {"newTitle", "priority", "userStory", "tasks", "acceptanceCriteria"},
-    "create": {"n", "action", "evidence", "title", "priority", "userStory", "tasks", "acceptanceCriteria", "source"},
+    "create": {"n", "action", "evidence", "title", "priority", "userStory", "tasks", "doneTasks", "acceptanceCriteria", "source"},
 }
 # The task field each action writes; two rows writing one field of one card are refused.
 FIELD = {"percent": "percent", "move": "bucket", "assign": "assign", "marker": "description", "source": "description", "rewrite": "description"}
@@ -240,6 +240,11 @@ def _check_card(row, title_key="title"):
             raise Refusal(f"Zeile {n}: Eintrag in tasks/acceptanceCriteria zu kurz oder mit Rand")
     if title_key == "title":
         _check_source(row["source"])
+        # Tasks ticked in the backlog entry: word for word from tasks.
+        done = row.get("doneTasks", [])
+        keys = {t.strip().lower() for t in tasks}
+        if not isinstance(done, list) or not all(isinstance(d, str) and d.strip().lower() in keys for d in done):
+            raise Refusal(f"Zeile {n}: doneTasks nur wörtlich aus tasks")
 
 
 def source_key(heading):
@@ -280,7 +285,8 @@ def checklist_of(tasks, checked=frozenset(), taken=frozenset()):
 
 def card_details(row):
     """Description and checklist of a new card, as post-backlog maps a create-backlog entry."""
-    return {"description": source_line(row["source"]) + "\n\n" + card_body(row), "checklist": checklist_of(row["tasks"])}
+    done = frozenset(d.strip().lower() for d in row.get("doneTasks", []))
+    return {"description": source_line(row["source"]) + "\n\n" + card_body(row), "checklist": checklist_of(row["tasks"], done)}
 
 
 def rewritten_details(details, row):
@@ -370,8 +376,9 @@ def validate(doc, cfg):
         _text(row.get("evidence", ""), "evidence", 400)
 
         if action == "create":
-            if set(row) != allowed:
-                raise Refusal(f"Zeile {n}: create braucht {', '.join(sorted(allowed - {'n', 'action'}))}")
+            # doneTasks is the one optional field of a create.
+            if set(row) - {"doneTasks"} != allowed - {"doneTasks"}:
+                raise Refusal(f"Zeile {n}: create braucht {', '.join(sorted(allowed - {'n', 'action', 'doneTasks'}))}")
             _check_card(row)
             title = row["title"]
             if title.lower() in seen_titles:

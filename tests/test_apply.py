@@ -555,6 +555,18 @@ class NewCards(Base):
         # The fake takes a details PATCH only with the new card's details etag; no assignment.
         self.assertEqual(g.tasks[new_id]["assignments"], {})
 
+    def test_tasks_ticked_in_the_entry_start_ticked(self):
+        g = FakeGraph([task(T1)])
+        out = self.run_apply(g, [card(doneTasks=["key entries by the input hash"])], [1])
+        self.assertEqual(out["status"], "ok")
+        checklist = g.writes[1][2]["checklist"]
+        self.assertEqual([checklist[k]["isChecked"] for k in ("item-01", "item-02")], [False, True])
+        # A done task the card does not carry refuses the file before any write.
+        g = FakeGraph([task(T1)])
+        out = self.run_apply(g, [card(doneTasks=["Some other task"])], [1])
+        self.assertEqual(out["status"], "aborted")
+        self.assertEqual(g.writes, [])
+
     def test_the_source_key_matches_the_mod(self):
         # The same literal sits in tests/board.test.tsx.
         self.assertEqual(apply.source_key(SOURCE["heading"]), "1edc5164ebbd")
