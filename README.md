@@ -5,7 +5,7 @@ A Claude Code plugin that keeps a Microsoft Planner board in step with your GitH
 - Finished work moves to Done, moved work changes columns, stale cards get a status marker.
 - New backlog entries become cards in the format of the `create-backlog` skill. Opus never invents a task: every new card belongs to exactly one entry of a backlog file.
 - Older cards that are not in that format can be rewritten into it, so every card on the board reads the same.
-- The next steps named in your stand file can be pulled into the Sprint Backlog; a card moves to In Progress only with proof that its work runs.
+- A stand file per backlog source steers the Sprint Backlog and In Progress: a line under `Nächster Schritt` or `In Arbeit` that names a backlog entry moves its card. Otherwise a card moves to In Progress only for an open PR of yours.
 - Nothing about your board is in this repository. Plan, buckets, user id, repositories and paths live in a local config file.
 
 The pane's labels are German.
@@ -28,7 +28,7 @@ With the proposals:
       Beleg: PR #133 merged, CHANGELOG 0.12.0
       In Review → Done
 [x] Marker „erledigt“ · PR app#133  Fix Cache Race
-[ ] → Sprint Backlog  Tidy the Docs Folder
+[x] → Sprint Backlog  Tidy the Docs Folder
 [x] neu in Backlog (Important)  Cache the Parsed Pages
       Quelle: app/backlog.md › 2026-10-20 — Cache the Parsed Pages
         A rerun should skip the parser.
@@ -44,7 +44,7 @@ With the proposals:
 2 Vorschläge verworfen:
  ✗  neu in Backlog  Extract the Flag Helper – userStory nicht „As a developer, I want to … so that ….“
  ✗  mir zuweisen  Fix Cache Race – Karte ist schon zugewiesen
-[ Übernehmen (3) ]  [ Alle ab ]  [ Abbrechen ]
+[ Übernehmen (4) ]  [ Alle ab ]  [ Abbrechen ]
 ```
 
 `[x]` / `[ ]` checks or unchecks a row; a press on the row opens its evidence, the value before and after and, for a new card, its source entry and the card as it will stand. After **Übernehmen** each row shows its result (`ok`, `übersprungen`, `unverändert`, `Fehler`, `nicht ausgeführt`, `unbekannt – auf dem Board prüfen`) as the write script reports it; **Schließen** closes the pane.
@@ -88,10 +88,10 @@ Copy `config.example.json` to `~/.claude/board/config.json` and fill it in. The 
 | `ownerId` | yes | Your Entra user id (a GUID). The only person the plugin ever assigns. |
 | `ownerLogin` | yes | Your GitHub login. Cards tied to a PR by anyone else are never assigned to you. |
 | `repos` | yes | Short name → `owner/repo`. The short name is what a status marker names (`PR app#133`); each repository's last 40 PRs are read as metadata. |
-| `backlogSources` | yes | Backlog files read from GitHub: `[{ "repo": <short name>, "path": "backlog.md", "ref": "main" }]`. Each `## ` heading is one entry; a heading containing `DONE` marks a finished entry. |
+| `backlogSources` | yes | Backlog files read from GitHub: `[{ "repo": <short name>, "path": "backlog.md", "ref": "main" }]`. Each `## ` heading is one entry; a heading containing `DONE` marks a finished entry. Optional `"stand": <local path>` (absolute or `~/…`): this source's stand file (see [Stand files](#stand-files)). |
 | `changelog` | no | One changelog file, same shape; its head (Unreleased and the two newest releases) is read. |
 | `statusFiles` | no | Local files read as context (absolute or `~/…`). One that cannot be read stops the run before the model. |
-| `standFile` | no | A local file with a `Nächster Schritt` / `Next step` heading. Only work named in that section is pulled into the Sprint Backlog. Without it no card is moved there. |
+| `standFile` | no | Older key, accepted and ignored; each backlog source names its stand file with `stand`. |
 | `skillPath` | no | The `create-backlog` skill file; default `~/.claude/skills/create-backlog/SKILL.md`. |
 | `skipTitlePrefixes` | no | Cards whose title starts with one of these (case aside) are never touched. |
 | `promptRules` | no | Extra rules for this board, one English sentence each, appended to the model's rules. |
@@ -100,9 +100,9 @@ Copy `config.example.json` to `~/.claude/board/config.json` and fill it in. The 
 
 ## What a run does
 
-1. **Collect** without a shell (each program started with an argument list): the plan's cards via `az rest` GET, the details (description, checklist, ETag) of every card not in Done, the PR metadata via `gh pr list --json`, the backlog files and the changelog via `gh api …/contents`, the status and stand files, the skill file. Every id is checked against `^[A-Za-z0-9_-]+$` before it enters a URL.
+1. **Collect** without a shell (each program started with an argument list): the plan's cards via `az rest` GET, the details (description, checklist, ETag) of every card not in Done, the PR metadata via `gh pr list --json`, the backlog files and the changelog via `gh api …/contents` (or their working copy with `local`), the status files, each source's stand file, the skill file. Every id is checked against `^[A-Za-z0-9_-]+$` before it enters a URL.
 2. **Judge:** one `$.model.complete` call, `opus`, `effort: medium`, no tools. All collected data sits as untrusted material inside a `<data>` block; the skill file goes into the rules word for word.
-3. **Check:** the plugin checks every proposed row against a positive list and drops what does not hold, with a reason shown in the pane. Ids, ETags and titles come from its own read, never from the answer. At most 30 rows.
+3. **Check:** the plugin checks every proposed row against a positive list and drops what does not hold, with a reason shown in the pane. Ids, ETags and titles come from its own read, never from the answer. Then it adds its own rows from the stand files. At most 30 rows.
 4. **Show** them in the pane. **Übernehmen** writes `~/.claude/board/confirm.json` (hash of the proposal file, the checked rows, the time) and starts `python3 -I apply.py --proposals <file> --rows <n,…> --sha256 <hash> --report <file>.jsonl`.
 
 A reply that is not valid JSON is unusable, with one exception: in the asked form (`{"rows":[`, one row per line, `]}`) a row line that does not parse is dropped alone, shown greyed out as `kein gültiges JSON`, and rows that depended on it go with it.
@@ -114,7 +114,7 @@ Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`
 | Action | Effect on the board |
 | --- | --- |
 | `percent` | 0, 50 or 100 %. |
-| `move` | Another bucket. Into the Sprint Backlog only from Backlog, for one whole line of the stand file's next-step section, at most 3 per run, never assigned. From Backlog or Sprint Backlog into In Progress only on the owner's own card and with proof that the work runs: an open PR by `ownerLogin` whose title or branch names the card (its `board-src` hash, or three of its title's words of four letters or more), or one whole list item under the stand file's `Offen` or `Nächster Schritt` heading; the plugin checks the proof against what it read, and such a row starts unticked, and so does the assign beside it. |
+| `move` | Another bucket. Into the Sprint Backlog only by the plugin itself, from a stand file; the model's moves there are dropped. From Backlog or Sprint Backlog into In Progress by a stand file, or by the model only on the owner's own card for an open PR by `ownerLogin` whose title or branch names the card (its `board-src` hash, or three of its title's words of four letters or more); the plugin checks the PR against what it read. A start stands unticked, and so does the assign beside it. |
 | `assign` | Assigns the owner, only on a free card that the owner made (`createdBy`) and that lies in In Progress or is moved there by a checked row of the same run; the write script checks both again on its live read. |
 | `marker` | A block `<!-- board -->` / `STATUS <date>: <status> · PR <repo>#<nr> · ref <path:line>` / `<!-- /board -->` at the top of the description; the rest stays byte-identical. A block edited by hand, or a second one, is left alone. |
 | `create` | A new card in Backlog, unassigned, at most 15 per run, mapped as the `post-backlog` skill does: the title without the date, priority Urgent 1 / Important 3 / Medium 5 / Low 9, a description of `Priority`, user story and acceptance criteria, the tasks as checklist (at most 20, the rest under `Remaining tasks:`). A line `<!-- board-src: <file>#<hash of the heading> -->` on top names the entry; markers go below it. |
@@ -122,7 +122,20 @@ Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`
 
 Not possible: deleting cards, renaming or rewriting cards, assigning anyone else, writing free text. Rewriting old cards is switched off: new cards come out in the skill format from the start; a rewrite row the model still sends is dropped.
 
-At most 30 rows per run in all. Rows the plugin drops stay visible in the pane, greyed out with their reason.
+At most 30 rows per run in all; the plugin's own rows from the stand files come first, the model's fill the room left. Rows the plugin drops stay visible in the pane, greyed out with their reason.
+
+### Stand files
+
+Each backlog source may name a stand file (`stand`). Two of its `## ` sections steer the board, and only for that source's backlog file:
+
+- A line under `## Nächster Schritt` that is exactly the title of an entry (its `## ` heading without the `YYYY-MM-DD — ` date) moves that entry's card from Backlog to the Sprint Backlog. The row starts ticked.
+- Such a line under `## In Arbeit` moves the card from Backlog or Sprint Backlog to In Progress and assigns it to the owner. Both rows start unticked. A card named in both sections goes to In Progress.
+- "Exactly" means: the whole line, aside from a list marker (`- `, `* `, `1. `), the spaces at its ends, runs of spaces and case. Backticks count. Prose around a title matches nothing, and neither does a title that two entries of the file share.
+- The card is the one whose `board-src` line names that entry, never one found by its title. It must be the owner's own (`createdBy`). A card already in that bucket or further right gets no row. An entry without a card gets none either: the create comes first, the move in a later run.
+- When the model moves the same card (to In Review or Done, say), its row wins and the stand file's row is left out.
+- A stand file that cannot be read, or lacks one of the two sections, moves nothing for its source; the pane says so (`benchmark.md: kein Abschnitt In Arbeit`) and the run goes on.
+- The evidence reads `Standdatei <file> › <section>: <line>`.
+- Striking a line from the stand file moves no card back.
 
 ### What a new card must be
 
