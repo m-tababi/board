@@ -475,7 +475,7 @@ Allowed actions, nothing else (no deletion, no renames, no free text on the boar
 S is one of ${statusesOf(cfg).join(', ')}. In a marker, repo and pr come together or not at all; ref is a repository path, optionally with :line or :from-to (e.g. backlog.md:1869); both optional. One row per action; at most one row per card and field (marker, source and rewrite all write the description). ID is a taskId exactly as given. Every text field is one line.
 E (evidence) is German, at most 200 characters, and names the source: file:line, PR number or changelog version.
 
-At most ${MAX_ROWS} rows; order them by importance. Answer with JSON only, no prose and no code fence: {"rows":[...]}. An empty list is a valid answer.${own}`
+At most ${MAX_ROWS} rows; order them by importance. Answer with JSON only, no prose and no code fence: {"rows":[...]}, each row on its own line. Leave out a row you do not mean; never write a placeholder row. An empty list is a valid answer.${own}`
 }
 
 function cutDescription(text: string): string {
@@ -525,6 +525,11 @@ export function promptFor(s: Sources, cfg: Config, nextSteps: string | null = nu
 
 // ---- the model's answer ---------------------------------------------------
 
+/** A row line of the reply that does not parse; checkProposal drops it. */
+export class Unparsed {
+  constructor(readonly line: string) {}
+}
+
 /** The JSON object in a reply, fenced or not; null when there is none. */
 export function extractJson(reply: string): unknown {
   const fenced = /```(?:json)?\s*([\s\S]*?)```/.exec(reply)
@@ -535,8 +540,27 @@ export function extractJson(reply: string): unknown {
   try {
     return JSON.parse(body.slice(start, end + 1))
   } catch {
-    return null
+    return salvageRows(body.slice(start, end + 1))
   }
+}
+
+/**
+ * A reply in the asked form – `{"rows":[`, one row per line, `]}` – keeps its
+ * rows that parse when one does not; any other form stays unusable (null).
+ */
+function salvageRows(body: string): { rows: unknown[] } | null {
+  const lines = body.split('\n').map(l => l.trim()).filter(l => l !== '')
+  if (lines.length < 2 || lines[0] !== '{"rows":[' || lines[lines.length - 1] !== ']}') return null
+  const rows: unknown[] = []
+  for (const line of lines.slice(1, -1)) {
+    if (!line.startsWith('{')) return null
+    try {
+      rows.push(JSON.parse(line.replace(/,$/, '')))
+    } catch {
+      rows.push(new Unparsed(line))
+    }
+  }
+  return { rows }
 }
 
 export type Marker = { status: Status; repo?: string; pr?: number; ref?: string }
@@ -782,6 +806,7 @@ function foreignPr(marker: Marker | undefined, prs: Pr[], cfg: Config): boolean 
  * Rows that fail are dropped with a reason; the rest are numbered from 1.
  */
 export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Config, ctx: Context): Checked | string {
+  if (raw === null) return 'Antwort ist kein gültiges JSON'
   if (typeof raw !== 'object' || raw === null || !Array.isArray((raw as { rows?: unknown }).rows)) {
     return 'Antwort ist kein Objekt mit "rows"'
   }
@@ -809,6 +834,10 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
 
   for (const [i, item] of ((raw as { rows: unknown[] }).rows).entries()) {
     const at = `Vorschlag ${i + 1}`
+    if (item instanceof Unparsed) {
+      drop(at, null, `kein gültiges JSON`)
+      continue
+    }
     if (typeof item !== 'object' || item === null) {
       drop(at, null, `kein Objekt`)
       continue

@@ -502,7 +502,49 @@ describe('proposal check', () => {
     expect(extractJson('```json\n{"rows":[]}\n```')).toEqual({ rows: [] })
     expect(extractJson('Here: {"rows":[]} done')).toEqual({ rows: [] })
     expect(extractJson('no json')).toBeNull()
-    expect(checkProposal(null, cards, prs, CFG, NO_CONTEXT)).toBe('Antwort ist kein Objekt mit "rows"')
+    expect(checkProposal(null, cards, prs, CFG, NO_CONTEXT)).toBe('Antwort ist kein gültiges JSON')
+    expect(checkProposal({ items: [] }, cards, prs, CFG, NO_CONTEXT)).toBe('Antwort ist kein Objekt mit "rows"')
+  })
+
+  test('a broken row line in the asked form goes alone; the rows that parse stay', () => {
+    const reply = [
+      '{"rows":[',
+      '{"action":"percent","taskId":"A1","percent":50,"evidence":"x.md:1"},',
+      '{"action":"assign","taskId":"A1".replace?"":"","evidence":""},',
+      '{"action":"percent","taskId":"B2","percent":100,"evidence":"x.md:2"}',
+      ']}',
+    ].join('\n')
+    const checked = checkProposal(extractJson(reply), cards, prs, CFG, NO_CONTEXT)
+    if (typeof checked === 'string') throw new Error(checked)
+    expect(checked.rows.map(r => ('taskId' in r ? r.taskId : ''))).toEqual(['A1', 'B2'])
+    expect(checked.dropped).toEqual(['Vorschlag 2: kein gültiges JSON'])
+    expect(checked.rejected.map(x => x.reason)).toEqual(['kein gültiges JSON'])
+  })
+
+  test('a broken reply in any other form stays unusable', () => {
+    const cut = '{"rows":[\n{"action":"percent","taskId":"A1","percent":50,"evidence":"x"},\n{"action":"percent","taskId":"B2",'
+    const pretty = '{"rows":[\n  {\n    "action": "percent",\n    "taskId": "A1".x\n  }\n]}'
+    for (const reply of [cut, pretty]) {
+      expect(extractJson(reply)).toBeNull()
+      expect(checkProposal(extractJson(reply), cards, prs, CFG, NO_CONTEXT)).toBe('Antwort ist kein gültiges JSON')
+    }
+  })
+
+  test('a broken start line takes its assign along: a backlog card stays free', () => {
+    const more: Card[] = [
+      ...cards,
+      { id: 'E5', title: 'Backlog card', bucket: 'backlog', percent: 0, assigned: 'none', createdBy: ME, etag: 'W/"e"', details: { etag: 'W/"ed"', description: '', checklist: [] } },
+    ]
+    const reply = [
+      '{"rows":[',
+      '{"action":"move","taskId":"E5","bucket":"in_progress","progress":{"standLine":"Backlog card runs"}.x,"evidence":"x"},',
+      '{"action":"assign","taskId":"E5","evidence":"x"}',
+      ']}',
+    ].join('\n')
+    const checked = checkProposal(extractJson(reply), more, prs, CFG, { ...NO_CONTEXT, standText: '## Offen\n- Backlog card runs' })
+    if (typeof checked === 'string') throw new Error(checked)
+    expect(checked.rows).toEqual([])
+    expect(checked.rejected.map(x => x.reason)).toEqual(['kein gültiges JSON', 'Karte nicht in In Progress (Backlog/Sprint bleiben frei)'])
   })
 
   test('statuses, repos and skipped cards follow the config', () => {
