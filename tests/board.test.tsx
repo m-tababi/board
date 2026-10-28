@@ -932,7 +932,7 @@ describe('the stand files', () => {
   test('A3: a title counts only against its own source, as a whole line with list marker, case and spacing aside', async () => {
     const mine = await card('S1', CACHE_AT, 'backlog')
     const bench = await card('B1', '2026-10-25 — Rerun the Bench', 'backlog', {}, 'beta/backlog.md')
-    // The tablebench stand file names a techpdfparser title, and the other way round: nothing.
+    // The second source's stand file names a title of the first, and the other way round: nothing.
     expect((await run([beta(stand(['- Cache the Parsed Pages'], []))], [mine, bench])).rows).toEqual([])
     expect((await run([alpha(stand(['- Rerun the Bench'], []))], [mine, bench])).rows).toEqual([])
     expect((await run([beta(stand(['- Rerun the Bench'], []))], [mine, bench])).rows.map(r => ('taskId' in r ? r.taskId : ''))).toEqual(['B1'])
