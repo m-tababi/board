@@ -964,6 +964,7 @@ describe('the stand files', () => {
     const system = systemPrompt(CFG, null)
     expect(system).toContain('never move a card to sprint_backlog')
     expect(system).not.toContain('standLine')
+    expect(systemPrompt(CFG, 'skill')).toContain('never copy its wording, story or task list')
     expect(system).not.toContain('nextStep')
   })
 
