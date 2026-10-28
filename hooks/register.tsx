@@ -688,19 +688,22 @@ export const register: Register = on => {
           return (
             <Box key={`row-${r.n}`} flexDirection="column">
               <Box>
-                {now === 'ready' ? (
-                  <Button key={`chk:${r.n}`} plain onPress={() => void toggle(r.n, 'isChecked')}>
-                    {r.isChecked ? '[x]' : '[ ]'}
-                  </Button>
-                ) : (
-                  <Text dimColor>{r.isChecked ? '[x]' : '[ ]'}</Text>
-                )}
-                <Text> </Text>
+                <Box flexShrink={0}>
+                  {now === 'ready' ? (
+                    <Button key={`chk:${r.n}`} plain onPress={() => void toggle(r.n, 'isChecked')}>
+                      {r.isChecked ? '[x]' : '[ ]'}
+                    </Button>
+                  ) : (
+                    <Text dimColor>{r.isChecked ? '[x]' : '[ ]'}</Text>
+                  )}
+                  <Text> </Text>
+                </Box>
                 <Button key={`row:${r.n}`} plain onPress={() => void toggle(r.n, 'isOpen')}>
                   {r.change} <Text dimColor>{r.card}</Text>
                 </Button>
-                {outcome !== '' && <Text color={got?.result === 'ok' || got?.result === 'unchanged' ? 'success' : 'warning'}>{outcome}</Text>}
               </Box>
+              {/* Beside a long title the outcome would get a column a few letters wide. */}
+              {outcome !== '' && <Text color={got?.result === 'ok' || got?.result === 'unchanged' ? 'success' : 'warning'}>    {outcome}</Text>}
               {r.isOpen && <Text dimColor>    Beleg: {r.why}</Text>}
               {r.isOpen && (
                 <Text dimColor>
