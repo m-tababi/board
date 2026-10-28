@@ -119,23 +119,21 @@ Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`
 | `marker` | A block `<!-- board -->` / `STATUS <date>: <status> · PR <repo>#<nr> · ref <path:line>` / `<!-- /board -->` at the top of the description; the rest stays byte-identical. A block edited by hand, or a second one, is left alone. |
 | `create` | A new card in Backlog, unassigned, at most 15 per run, mapped as the `post-backlog` skill does: the title without the date, priority Urgent 1 / Important 3 / Medium 5 / Low 9, a description of `Priority`, user story and acceptance criteria, the tasks as checklist (at most 20, the rest under `Remaining tasks:`). A line `<!-- board-src: <file>#<hash of the heading> -->` on top names the entry; markers go below it. |
 | `source` | Puts only that `board-src` line on top of an older card that covers an entry but has none. |
-| `rewrite` | Brings an open card that is not in the skill format into it, at most 15 per run: new title and priority (task PATCH), then the post-backlog description and the tasks as checklist (details PATCH). Nothing is lost: everything the old description held stays word for word below the new body under `Previous notes:`; a ticked checklist item stays (its tick carries over where a task repeats its text), only unticked items no task repeats go; a row whose kept ticks and tasks would pass 20 items is dropped. Its `board-src` line and `<!-- board -->` block stay on top. Never for a card someone else made (`createdBy`, checked by the plugin and again by the write script on its live read), holds or ties to their PR, nor for a description over 20 000 characters. The pane shows the whole old card against the new one, and a rewrite row starts unticked. |
 
-Not possible: deleting cards, renaming outside a rewrite, assigning anyone else, writing free text.
+Not possible: deleting cards, renaming or rewriting cards, assigning anyone else, writing free text. Rewriting old cards is switched off: new cards come out in the skill format from the start; a rewrite row the model still sends is dropped.
 
 At most 30 rows per run in all. Rows the plugin drops stay visible in the pane, greyed out with their reason.
 
-### What a new or rewritten card must be
+### What a new card must be
 
 The source of truth for the format is the `create-backlog` skill itself. The plugin and the write script check what a machine can check, and drop or refuse anything else:
 
-- Title 3–70 characters, one line, no date prefix (`2026-10-20 — …`), no backticks, no `*`, `_`, `[` or `](`.
+- Title 3–255 characters (Planner's limit), one line, no date prefix (`2026-10-20 — …`), no backticks, no `*`, `[` or `](`; a code name with underscores may stand in it, as the skill allows.
 - Priority one of `Urgent`, `Important`, `Medium`, `Low`.
 - User story `As a developer, I want to … so that ….`
-- 1–40 tasks of 3–100 characters, 3–5 acceptance criteria of 3–200 characters; no line breaks or control characters in any field.
+- 1–40 tasks of 3–100 characters (a longer task is cut to 97 characters and `...`, as the `post-backlog` skill does), 3–5 acceptance criteria of 3–200 characters; no line breaks or control characters in any field.
 - No `<!--` in story, tasks or criteria.
 - For a new card: the source heading is an entry of a backlog file that was read, not in a `DONE` section, and no open card already carries its `board-src` line; no open card has the same title (date, backticks and punctuation aside), and no card at all has the exact title.
-- For a rewrite: the card is open, not yet in the format (title and description as post-backlog writes them), held by no one else, tied to no one else's PR; no other card has the new title. That the new text keeps the old card's meaning is yours to check in the pane, where old and new stand side by side.
 
 "English" is asked of the model, not checked; the text is in the pane before you take it over.
 
