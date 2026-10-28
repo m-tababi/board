@@ -722,13 +722,10 @@ export const register: Register = on => {
         {now === 'ready' &&
           gone.map(x => (
             <Box key={`drop-${x.i}`} flexDirection="column">
-              <Box>
-                <Text dimColor> ✗  </Text>
-                <Button key={`drop:${x.i}`} plain dimColor onPress={() => void update($, rejected, l => l.map(y => (y.i === x.i ? { ...y, isOpen: !y.isOpen } : y)))}>
-                  {x.change} <Text dimColor>{x.card}</Text>
-                </Button>
-                <Text dimColor> – {x.reason}</Text>
-              </Box>
+              <Button key={`drop:${x.i}`} plain dimColor onPress={() => void update($, rejected, l => l.map(y => (y.i === x.i ? { ...y, isOpen: !y.isOpen } : y)))}>
+                ✗ {x.change} <Text dimColor>{x.card}</Text>
+              </Button>
+              <Text dimColor>    – {x.reason}</Text>
               {x.isOpen &&
                 x.detail.map(d => (
                   <Text dimColor>
