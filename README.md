@@ -122,7 +122,7 @@ Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`
 
 Not possible: deleting cards, renaming or rewriting cards, assigning anyone else, writing free text. Rewriting old cards is switched off: new cards come out in the skill format from the start; a rewrite row the model still sends is dropped.
 
-At most 30 rows per run in all; the plugin's own rows from the stand files always fit, the model's fill the room left (shown after the model's). Rows the plugin drops stay visible in the pane, greyed out with their reason.
+At most 30 rows per run in all; the plugin's own rows from the stand files come first (at most 30, a move never parted from its assign; a card tied to someone else's PR is not started), the model's fill the room left (shown after the model's). Rows the plugin drops stay visible in the pane, greyed out with their reason.
 
 ### Stand files
 

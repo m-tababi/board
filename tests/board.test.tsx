@@ -994,6 +994,27 @@ describe('the stand files', () => {
     ])
   })
 
+  test('the mod’s own rows stop at the row limit, a move never parted from its assign; a card tied to someone else’s PR is not started', async () => {
+    const backlog = ['# Backlog', '', ...Array.from({ length: 16 }, (_, i) => `## 2026-10-01 — Task ${i}\n`)].join('\n')
+    const entries = entriesOf('alpha/backlog.md', backlog)
+    const keys = new Map<string, string>()
+    for (const e of entries) keys.set(e.heading, await sourceKey(e.heading))
+    const cards = await Promise.all(entries.map((e, i) => card(`K${i}`, e.heading, 'backlog')))
+    const work = alpha(stand([], entries.map((_, i) => `- Task ${i}`)))
+    const checked = checkProposal({ rows: [] }, cards, [], CFG, { entries, keys, hasSkill: true, stands: [work] })
+    if (typeof checked === 'string') throw new Error(checked)
+    expect(checked.rows).toHaveLength(MAX_ROWS)
+    expect(checked.rows.slice(-2).map(r => r.action)).toEqual(['move', 'assign'])
+    expect(checked.dropped).toEqual([`Standdatei „Extraktion: Card K15“: über der Grenze von ${MAX_ROWS} Zeilen`])
+    // A marker naming a PR that is not the owner's keeps the card out of In Progress.
+    const mine = [await card('S1', CACHE_AT, 'backlog')]
+    const tied = await run([alpha(stand([], ['- Cache the Parsed Pages']))], mine, [
+      { action: 'marker', taskId: 'S1', marker: { status: 'open', repo: 'alpha', pr: 174 }, evidence: 'x' },
+    ])
+    expect(tied.rows.map(r => r.action)).toEqual(['marker'])
+    expect(tied.dropped).toEqual(['Standdatei „Extraktion: Card S1“: Karte gehört zu fremdem PR'])
+  })
+
   test('W9: a stand file unreadable or without a section moves nothing for its source and says so; the other source goes on', async () => {
     const noWork = '# Stand\n\n## Nächster Schritt\n- Rerun the Bench\n'
     expect(standNotices([alpha(null), beta(noWork), alpha(stand([], []))])).toEqual(['extraktion.md: nicht lesbar', 'benchmark.md: kein Abschnitt In Arbeit'])

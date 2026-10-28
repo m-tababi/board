@@ -1080,11 +1080,21 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
     const card = m.card
     const details = card.details
     if (details === undefined) continue
+    // A card tied to someone else's PR is not started, as the model may not start it either.
+    if (m.bucket === 'in_progress' && foreignPr(markers.get(card.id), prs, cfg)) {
+      drop(`Standdatei „${clean(card.title, 60)}“`, { action: 'move', taskId: card.id, bucket: m.bucket, evidence: m.evidence }, 'Karte gehört zu fremdem PR')
+      continue
+    }
     const base = { n: 0, taskId: card.id, title: clean(card.title, 255), etag: card.etag, detailsEtag: details.etag, evidence: m.evidence }
     const pair: Row[] = [{ ...base, action: 'move', bucket: m.bucket }]
     const hasAssign = kept.some(r => r.action === 'assign' && r.taskId === card.id)
-    if (m.bucket === 'in_progress' && card.assigned === 'none' && !hasAssign && !foreignPr(markers.get(card.id), prs, cfg)) pair.push({ ...base, action: 'assign' })
+    if (m.bucket === 'in_progress' && card.assigned === 'none' && !hasAssign) pair.push({ ...base, action: 'assign' })
     if (GUID_RE.test(JSON.stringify(pair))) continue
+    // apply.py takes at most MAX_ROWS rows; a move and its assign stay together.
+    if (own.length + pair.length > MAX_ROWS) {
+      drop(`Standdatei „${clean(card.title, 60)}“`, { action: 'move', taskId: card.id, bucket: m.bucket, evidence: m.evidence }, `über der Grenze von ${MAX_ROWS} Zeilen`)
+      continue
+    }
     own.push(...pair)
   }
 
