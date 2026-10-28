@@ -105,6 +105,8 @@ Copy `config.example.json` to `~/.claude/board/config.json` and fill it in. The 
 3. **Check:** the plugin checks every proposed row against a positive list and drops what does not hold, with a reason shown in the pane. Ids, ETags and titles come from its own read, never from the answer. At most 30 rows.
 4. **Show** them in the pane. **Übernehmen** writes `~/.claude/board/confirm.json` (hash of the proposal file, the checked rows, the time) and starts `python3 -I apply.py --proposals <file> --rows <n,…> --sha256 <hash> --report <file>.jsonl`.
 
+A reply that is not valid JSON is unusable, with one exception: in the asked form (`{"rows":[`, one row per line, `]}`) a row line that does not parse is dropped alone, shown greyed out as `kein gültiges JSON`, and rows that depended on it go with it.
+
 Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`, `proposals-<time>.json`, `apply-<time>.jsonl`, `last-run.md`.
 
 ### Actions
@@ -112,8 +114,8 @@ Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`
 | Action | Effect on the board |
 | --- | --- |
 | `percent` | 0, 50 or 100 %. |
-| `move` | Another bucket. Into the Sprint Backlog only from Backlog, for one whole line of the stand file's next-step section, at most 3 per run, never assigned. From Backlog or Sprint Backlog into In Progress only on the owner's own card and with proof that the work runs: an open PR by `ownerLogin` whose title or branch names the card (its `board-src` hash, or three of its title's words of four letters or more), or one whole list item under the stand file's `Offen` or `Nächster Schritt` heading; the plugin checks the proof against what it read, and such a row starts unticked. |
-| `assign` | Assigns the owner, only on a free card in In Progress that the owner made (`createdBy`). |
+| `move` | Another bucket. Into the Sprint Backlog only from Backlog, for one whole line of the stand file's next-step section, at most 3 per run, never assigned. From Backlog or Sprint Backlog into In Progress only on the owner's own card and with proof that the work runs: an open PR by `ownerLogin` whose title or branch names the card (its `board-src` hash, or three of its title's words of four letters or more), or one whole list item under the stand file's `Offen` or `Nächster Schritt` heading; the plugin checks the proof against what it read, and such a row starts unticked, and so does the assign beside it. |
+| `assign` | Assigns the owner, only on a free card that the owner made (`createdBy`) and that lies in In Progress or is moved there by a checked row of the same run; the write script checks both again on its live read. |
 | `marker` | A block `<!-- board -->` / `STATUS <date>: <status> · PR <repo>#<nr> · ref <path:line>` / `<!-- /board -->` at the top of the description; the rest stays byte-identical. A block edited by hand, or a second one, is left alone. |
 | `create` | A new card in Backlog, unassigned, at most 15 per run, mapped as the `post-backlog` skill does: the title without the date, priority Urgent 1 / Important 3 / Medium 5 / Low 9, a description of `Priority`, user story and acceptance criteria, the tasks as checklist (at most 20, the rest under `Remaining tasks:`). A line `<!-- board-src: <file>#<hash of the heading> -->` on top names the entry; markers go below it. |
 | `source` | Puts only that `board-src` line on top of an older card that covers an entry but has none. |
