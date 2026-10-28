@@ -90,7 +90,7 @@ Copy `config.example.json` to `~/.claude/board/config.json` and fill it in. The 
 | `repos` | yes | Short name → `owner/repo`. The short name is what a status marker names (`PR app#133`); each repository's last 40 PRs are read as metadata. |
 | `backlogSources` | yes | Backlog files read from GitHub: `[{ "repo": <short name>, "path": "backlog.md", "ref": "main" }]`. Each `## ` heading is one entry; a heading containing `DONE` marks a finished entry. Optional `"stand": <local path>` (absolute or `~/…`): this source's stand file (see [Stand files](#stand-files)). |
 | `changelog` | no | One changelog file, same shape; its head (Unreleased and the two newest releases) is read. |
-| `statusFiles` | no | Local files read as context (absolute or `~/…`). One that cannot be read stops the run before the model. |
+| `statusFiles` | no | Local files read as context (absolute or `~/…`). One that cannot be read stops the run before the model, unless it is a source's stand file. |
 | `standFile` | no | Older key, accepted and ignored; each backlog source names its stand file with `stand`. |
 | `skillPath` | no | The `create-backlog` skill file; default `~/.claude/skills/create-backlog/SKILL.md`. |
 | `skipTitlePrefixes` | no | Cards whose title starts with one of these (case aside) are never touched. |
@@ -122,7 +122,7 @@ Run data lives in `~/.claude/board/`: `snapshot-<time>.json`, `reply-<time>.txt`
 
 Not possible: deleting cards, renaming or rewriting cards, assigning anyone else, writing free text. Rewriting old cards is switched off: new cards come out in the skill format from the start; a rewrite row the model still sends is dropped.
 
-At most 30 rows per run in all; the plugin's own rows from the stand files come first, the model's fill the room left. Rows the plugin drops stay visible in the pane, greyed out with their reason.
+At most 30 rows per run in all; the plugin's own rows from the stand files always fit, the model's fill the room left (shown after the model's). Rows the plugin drops stay visible in the pane, greyed out with their reason.
 
 ### Stand files
 

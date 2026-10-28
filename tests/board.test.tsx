@@ -1452,6 +1452,18 @@ describe('a board run in the pane', () => {
     })
   }
 
+  test('a stand file that is also a status file and cannot be read does not stop the run', async ($, on) => {
+    const config = JSON.stringify({ ...CONFIG_FILE, statusFiles: [...CONFIG_FILE.statusFiles, '~/notes/stand.md'] })
+    const seen = world(on, { reply: '{"rows":[]}', stand: null, config })
+    await start($, false)
+    await board($)
+    const view = await pane($)
+
+    const done = await until(seen, view, 'Keine Änderungen vorgeschlagen')
+    expect(done).toContain('stand.md: nicht lesbar')
+    expect(seen.prompts).toHaveLength(1)
+  })
+
   for (const config of [null, '{', JSON.stringify({ ...CONFIG_FILE, planId: 'bad id' })]) {
     test(`a ${config === null ? 'missing' : 'broken'} config stops before anything is read`, async ($, on) => {
       const seen = world(on, { config })

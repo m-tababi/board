@@ -182,11 +182,14 @@ async function collect($: EngineInterface, cfg: Config, today: string, homeDir: 
   if (cfg.changelog !== undefined && changelog !== null) {
     files.push({ name: `${cfg.changelog.repo}/${cfg.changelog.path} (${cfg.changelog.ref}; head)`, text: changelogHead(changelog) })
   }
+  // A status file that is also a source's stand file only goes unread: its stand notice says so.
+  const standPaths = new Set(cfg.backlogSources.flatMap(file => (file.stand === undefined ? [] : [local(file.stand, homeDir)])))
   for (const path of cfg.statusFiles) {
     const text = await $.fs.read(local(path, homeDir)).catch(() => {
+      if (standPaths.has(local(path, homeDir))) return null
       throw new Error(`Standdatei ${baseName(path)} nicht lesbar`)
     })
-    files.push({ name: `status file ${baseName(path)}`, text })
+    if (text !== null) files.push({ name: `status file ${baseName(path)}`, text })
   }
   // Each source's stand file moves that source's cards; one that cannot be read moves nothing, the run goes on.
   const stands: Stand[] = []
