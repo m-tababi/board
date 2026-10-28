@@ -18,7 +18,8 @@
     {
       "repo": "app",
       "path": "backlog.md",
-      "ref": "main"
+      "ref": "main",
+      "stand": "~/notes/status.md"
     }
   ],
   "changelog": {
@@ -29,7 +30,6 @@
   "statusFiles": [
     "~/notes/status.md"
   ],
-  "standFile": "~/notes/status.md",
   "skillPath": "~/.claude/skills/create-backlog/SKILL.md",
   "skipTitlePrefixes": [],
   "promptRules": [],

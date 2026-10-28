@@ -20,7 +20,6 @@ import {
   isRunFile,
   isStamped,
   lastRunMarkdown,
-  nextStepsOf,
   outcomeFrom,
   paneRows,
   parseConfig,
@@ -33,10 +32,11 @@ import {
   sha256Hex,
   sourceKey,
   stamp,
+  standNotices,
   systemPrompt,
   tableLines,
 } from './board'
-import type { Card, Config, Context, Entry, Outcome, Pr, RepoFile, Row, Sources } from './board'
+import type { Card, Config, Context, Entry, Outcome, Pr, RepoFile, Row, Sources, Stand } from './board'
 import type { BoardCounts, BoardPhase, BoardRejected, BoardResult, BoardRow } from '../types'
 
 const PANE = 'board-update'
@@ -73,7 +73,7 @@ const GUARD_REFUSAL =
 // reload drops it with the module (the pane then asks for a new run).
 type Pending = { cfg: Config; dir: string; at: string; now: number; file: string; hash: string; rows: Row[]; isComplete: boolean }
 
-type Collected = Sources & { unreadable: number; entries: Entry[]; nextSteps: string | null; standText: string | null; skill: string | null }
+type Collected = Sources & { unreadable: number; entries: Entry[]; stands: Stand[]; skill: string | null }
 let pending: Pending | null = null
 // The model call of the run in flight, for Abbrechen.
 let stop: AbortController | null = null
@@ -188,23 +188,17 @@ async function collect($: EngineInterface, cfg: Config, today: string, homeDir: 
     })
     files.push({ name: `status file ${baseName(path)}`, text })
   }
-  // The stand file's next steps feed the Sprint Backlog; without one, nothing is pulled.
-  let nextSteps: string | null = null
-  let standText: string | null = null
-  if (cfg.standFile !== undefined) {
-    const standFile = cfg.standFile
-    const text = await $.fs.read(local(standFile, homeDir)).catch(() => {
-      throw new Error(`standFile ${baseName(standFile)} nicht lesbar`)
-    })
-    nextSteps = nextStepsOf(text)
-    standText = text
-    // Its lines are the proof for In Progress; the model reads it once.
-    if (!cfg.statusFiles.includes(standFile)) files.push({ name: `stand file ${baseName(standFile)}`, text })
+  // Each source's stand file moves that source's cards; one that cannot be read moves nothing, the run goes on.
+  const stands: Stand[] = []
+  for (const file of cfg.backlogSources) {
+    if (file.stand === undefined) continue
+    const text = await $.fs.read(local(file.stand, homeDir)).catch(() => null)
+    stands.push({ file: `${file.repo}/${file.path}`, name: baseName(file.stand), text })
   }
   // The create-backlog skill, read word for word at each run; without it no card is created.
   const skill = await $.fs.read(local(cfg.skillPath ?? DEFAULT_SKILL_PATH, homeDir)).catch(() => null)
   const entries = cfg.backlogSources.flatMap((file, i) => entriesOf(`${file.repo}/${file.path}`, backlogs[i] ?? ''))
-  return { cards, prs: prs.flat(), files, today, unreadable, entries, nextSteps, standText, skill }
+  return { cards, prs: prs.flat(), files, today, unreadable, entries, stands, skill }
 }
 
 async function readConfig($: EngineInterface, dir: string): Promise<Config> {
@@ -349,10 +343,10 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
     return { text: 'Board-Abgleich abgebrochen.', isHeld: false }
   }
   await $.fs.write(`${dir}/snapshot-${at}.json`, `${JSON.stringify({ at, cards: sources.cards, prs: sources.prs }, null, 2)}\n`)
-  const prompt = promptFor(sources, cfg, sources.nextSteps)
+  const prompt = promptFor(sources, cfg)
   const notices = [
     ...(sources.skill === null ? [`Neue Karten gesperrt: Skill-Datei ${baseName(cfg.skillPath ?? DEFAULT_SKILL_PATH)} nicht lesbar.`] : []),
-    ...(cfg.standFile !== undefined && sources.nextSteps === null ? ['Kein Abschnitt „Nächster Schritt“ in der standFile: keine Sprint-Vorschläge.'] : []),
+    ...standNotices(sources.stands),
   ]
   await update($, counts, c => ({ ...c, notices }))
   if (!hasSurface) for (const line of notices) log($, `Board: ${line}`)
@@ -373,7 +367,7 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
   }
   $.ui.status('▦ Board: Opus bewertet …')
   const reply = await $.model.complete(
-    { model: 'opus', effort: 'medium', system: systemPrompt(cfg, sources.skill, sources.nextSteps !== null), prompt, maxTokens: MAX_TOKENS, timeoutMs: MODEL_TIMEOUT_MS },
+    { model: 'opus', effort: 'medium', system: systemPrompt(cfg, sources.skill), prompt, maxTokens: MAX_TOKENS, timeoutMs: MODEL_TIMEOUT_MS },
     { signal: stop.signal },
   )
   if (isCancelled || (!reply.isAnswered && reply.reason === 'aborted')) {
@@ -388,7 +382,7 @@ async function reconcile($: EngineInterface, hasSurface: boolean): Promise<{ tex
 
   const keys = new Map<string, string>()
   for (const entry of sources.entries) keys.set(entry.heading, await sourceKey(entry.heading))
-  const ctx: Context = { entries: sources.entries, keys, hasSkill: sources.skill !== null, nextSteps: sources.nextSteps, standText: sources.standText }
+  const ctx: Context = { entries: sources.entries, keys, hasSkill: sources.skill !== null, stands: sources.stands }
   const checked = checkProposal(extractJson(reply.text), sources.cards, sources.prs, cfg, ctx)
   if (typeof checked === 'string') throw new Error(`Bewertung unbrauchbar: ${checked} (Rohantwort reply-${at}.txt)`)
   await update($, rejected, () => checked.rejected.map((x, i) => ({ ...x, i: i + 1, isOpen: false })))

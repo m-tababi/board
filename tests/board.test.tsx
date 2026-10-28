@@ -18,16 +18,17 @@ import {
   isSkillFormat,
   paneRows,
   entriesOf,
-  nextStepsOf,
   normalTitle,
   parseConfig,
   sourceKey,
   pillFits,
   reminder,
   sha256Hex,
+  standNotices,
+  standSection,
   systemPrompt,
 } from '../hooks/board'
-import type { BucketKey, Card, Config, Context, Pr } from '../hooks/board'
+import type { BucketKey, Card, Config, Context, Pr, Stand } from '../hooks/board'
 
 // Made-up values only: no real plan, bucket, user id or path belongs in a test.
 const HOME = '/u/tester'
@@ -53,10 +54,9 @@ const CONFIG_FILE = {
   ownerId: ME,
   ownerLogin: 'owner-login',
   repos: { alpha: 'example-org/alpha', beta: 'example-org/beta' },
-  backlogSources: [{ repo: 'alpha', path: 'backlog.md', ref: 'main' }],
+  backlogSources: [{ repo: 'alpha', path: 'backlog.md', ref: 'main', stand: '~/notes/stand.md' }],
   changelog: { repo: 'alpha', path: 'CHANGELOG.md', ref: 'main' },
   statusFiles: ['~/notes/status.md', '/srv/notes/bench.md'],
-  standFile: '~/notes/status.md',
   skipTitlePrefixes: ['Side:'],
   promptRules: ['Cards about the side project get nothing.'],
   extraStatuses: ['side_project'],
@@ -96,13 +96,13 @@ const create = (extra: Record<string, unknown> = {}) => ({
   evidence: 'alpha/backlog.md:3',
   ...extra,
 })
-const NO_CONTEXT: Context = { entries: [], keys: new Map(), hasSkill: true, nextSteps: null, standText: null }
+const NO_CONTEXT: Context = { entries: [], keys: new Map(), hasSkill: true, stands: [] }
 
 async function contextFor(text: string, extra: Partial<Context> = {}): Promise<Context> {
   const entries = entriesOf('alpha/backlog.md', text)
   const keys = new Map<string, string>()
   for (const e of entries) keys.set(e.heading, await sourceKey(e.heading))
-  return { entries, keys, hasSkill: true, nextSteps: null, standText: null, ...extra }
+  return { entries, keys, hasSkill: true, stands: [], ...extra }
 }
 
 const T_OPEN = 'TaskOpen0000000000000001'
@@ -149,6 +149,10 @@ type WorldOptions = {
   failStand?: boolean
   noSkill?: boolean
   backlog?: string
+  // The stand file's text; null: it cannot be read.
+  stand?: string | null
+  // A card's description by task id (default: a plain body).
+  descriptions?: Record<string, string>
   // The config file's text; null: there is none.
   config?: string | null
   // What apply.py does: its stdout, or a rejection (killed at the timeout) with the report it left.
@@ -217,6 +221,10 @@ function world(on: On, o: WorldOptions = {}) {
     if (e.path === `${HOME}/notes/status.md` || e.path === '/srv/notes/bench.md') {
       return o.failStand === true && e.path.endsWith('/bench.md') ? { deny: `ENOENT ${e.path}` } : { value: '# Stand\n\n## Nächster Schritt\nWrite the parser docs next.\n' }
     }
+    if (e.path === `${HOME}/notes/stand.md`) {
+      const text = o.stand === undefined ? '# Stand\n\n## In Arbeit\n\n## Nächster Schritt\nWrite the parser docs next.\n' : o.stand
+      return text === null ? { deny: `ENOENT ${e.path}` } : { value: text }
+    }
     if (e.path === `${HOME}/.claude/skills/create-backlog/SKILL.md`) {
       return o.noSkill === true ? { deny: `ENOENT ${e.path}` } : { value: '# Create Backlog\nSKILL BODY verbatim' }
     }
@@ -234,7 +242,9 @@ function world(on: On, o: WorldOptions = {}) {
       const url = argv[argv.indexOf('--url') + 1] ?? ''
       if (url.endsWith(`/planner/plans/${PLAN_ID}/tasks`)) return { value: result(0, JSON.stringify({ value: o.tasks ?? TASKS })) }
       const id = /\/planner\/tasks\/([^/]+)\/details$/.exec(url)?.[1]
-      return id === undefined ? { value: result(1, '', 'unexpected') } : { value: result(0, JSON.stringify(details(id))) }
+      if (id === undefined) return { value: result(1, '', 'unexpected') }
+      const description = o.descriptions?.[id]
+      return { value: result(0, JSON.stringify(description === undefined ? details(id) : { ...details(id), description })) }
     }
     if (argv[0] === GH && argv[1] === 'pr') {
       return { value: result(0, JSON.stringify(line.includes('example-org/alpha') ? PRS : [])) }
@@ -497,12 +507,14 @@ describe('proposal check', () => {
     expect(checked.rows.map(r => ('taskId' in r ? r.taskId : ''))).toEqual(['A1'])
     expect(checked.dropped).toHaveLength(2)
 
+    const keyed = more.map(c => (c.id === 'E5' ? { ...c, details: { etag: 'W/"ed"', description: '<!-- board-src: alpha/backlog.md#0123456789ab -->\n\nx', checklist: [] } } : c))
+    const running: Pr = { repo: 'alpha', number: 181, title: 't', author: 'owner-login', state: 'OPEN', isDraft: false, mergedAt: null, updatedAt: '', branch: 'feature/0123456789ab' }
     const moved = checkProposal(
-      { rows: [{ action: 'move', taskId: 'E5', bucket: 'in_progress', progress: { standLine: 'Backlog card runs' } }, { action: 'assign', taskId: 'E5' }] },
-      more,
-      prs,
+      { rows: [{ action: 'move', taskId: 'E5', bucket: 'in_progress', progress: { pr: 181, repo: 'alpha' } }, { action: 'assign', taskId: 'E5' }] },
+      keyed,
+      [...prs, running],
       CFG,
-      { ...NO_CONTEXT, standText: '## Offen\n- Backlog card runs' },
+      NO_CONTEXT,
     )
     if (typeof moved === 'string') throw new Error(moved)
     expect(moved.rows.map(r => r.action)).toEqual(['move', 'assign'])
@@ -547,11 +559,11 @@ describe('proposal check', () => {
     ]
     const reply = [
       '{"rows":[',
-      '{"action":"move","taskId":"E5","bucket":"in_progress","progress":{"standLine":"Backlog card runs"}.x,"evidence":"x"},',
+      '{"action":"move","taskId":"E5","bucket":"in_progress","progress":{"pr":181,"repo":"alpha"}.x,"evidence":"x"},',
       '{"action":"assign","taskId":"E5","evidence":"x"}',
       ']}',
     ].join('\n')
-    const checked = checkProposal(extractJson(reply), more, prs, CFG, { ...NO_CONTEXT, standText: '## Offen\n- Backlog card runs' })
+    const checked = checkProposal(extractJson(reply), more, prs, CFG, NO_CONTEXT)
     if (typeof checked === 'string') throw new Error(checked)
     expect(checked.rows).toEqual([])
     expect(checked.rejected.map(x => x.reason)).toEqual(['kein gültiges JSON', 'Karte nicht in In Progress (Backlog/Sprint bleiben frei)'])
@@ -723,7 +735,7 @@ describe('rewriting old cards', () => {
     if (typeof checked === 'string') throw new Error(checked)
     expect(checked.rows).toEqual([])
     expect(checked.dropped).toEqual(['Vorschlag 1: neu fassen ist abgeschaltet'])
-    expect(systemPrompt(CFG, 'skill', false)).not.toContain('"action":"rewrite"')
+    expect(systemPrompt(CFG, 'skill')).not.toContain('"action":"rewrite"')
   })
 })
 
@@ -745,7 +757,7 @@ describe('cards someone else made', () => {
       {
         rows: [
           { action: 'assign', taskId: 'C9' },
-          { action: 'move', taskId: 'C8', bucket: 'in_progress', progress: { standLine: 'Cache work runs' } },
+          { action: 'move', taskId: 'C8', bucket: 'in_progress', progress: { pr: 181, repo: 'alpha' } },
           { action: 'assign', taskId: 'C7' },
           { action: 'percent', taskId: 'C9', percent: 50 },
         ],
@@ -753,7 +765,7 @@ describe('cards someone else made', () => {
       [theirs, backlog, unknown],
       [],
       CFG,
-      { ...NO_CONTEXT, standText: '## Offen\n- Cache work runs' },
+      NO_CONTEXT,
     )
     if (typeof checked === 'string') throw new Error(checked)
     expect(checked.rows.map(r => r.action)).toEqual(['percent'])
@@ -784,41 +796,21 @@ describe('In Progress', () => {
     pr(175, 'owner-login', 'OPEN', 'Release 0.12.0'),
     pr(176, 'owner-login', 'OPEN', 'Small fix', 'feature/0123456789ab-tidy'),
   ]
-  const STAND = '# Stand\n\n## Offen\n- Cache work runs on branch feature/cache\n---\n\n## Erledigt\n- Old work runs no more\n\n## Nächster Schritt\n1. Then the docs run\n'
-  const ctx: Context = { ...NO_CONTEXT, standText: STAND }
   const start = (taskId: string, progress?: unknown) => ({ action: 'move', taskId, bucket: 'in_progress', ...(progress === undefined ? {} : { progress }), evidence: 'x' })
-  const check = (rows: unknown[], on: Context = ctx) => {
-    const checked = checkProposal({ rows }, cards, prs, CFG, on)
+  const check = (rows: unknown[]) => {
+    const checked = checkProposal({ rows }, cards, prs, CFG, NO_CONTEXT)
     if (typeof checked === 'string') throw new Error(checked)
     return checked
   }
 
-  test('an open PR of the owner or a whole line of the stand file starts a card, with assign', () => {
+  test('an open PR of the owner that names the card starts it, with assign', () => {
     const viaPr = check([start('B1', { pr: 174, repo: 'alpha' }), { action: 'assign', taskId: 'B1' }])
     expect(viaPr.dropped).toEqual([])
     expect(viaPr.rows.map(r => r.action)).toEqual(['move', 'assign'])
     expect(viaPr.rows[0]?.evidence).toBe('Läuft: PR alpha#174 „Cache parsed pages per input“ – x')
-    const viaLine = check([start('B2', { standLine: 'Cache work runs on branch feature/cache' })])
-    expect(viaLine.rows[0]?.evidence).toBe('Läuft: „Cache work runs on branch feature/cache“ – x')
-    expect(check([start('B2', { standLine: 'Then the docs run' })]).rows).toHaveLength(1)
+    expect(check([start('B2', { pr: 174, repo: 'alpha' })]).rows).toHaveLength(1)
     // A PR whose branch carries the card's source hash names it too.
     expect(check([start('B4', { pr: 176, repo: 'alpha' })]).rows).toHaveLength(1)
-  })
-
-  test('a PR of the owner that does not name the card, or a line outside the running sections: dropped', () => {
-    for (const progress of [
-      { pr: 175, repo: 'alpha' },
-      { standLine: 'Old work runs no more' },
-      { standLine: '## Offen' },
-      { standLine: 'Offen' },
-      { standLine: '---' },
-      { standLine: '' },
-    ]) {
-      const { rows, dropped } = check([start('B1', progress)])
-      expect([progress, rows]).toEqual([progress, []])
-      expect(dropped[0]).toContain('In Progress nur mit')
-    }
-    expect(check([start('B4', { pr: 174, repo: 'alpha' })]).rows).toEqual([])
   })
 
   test('a start stands unticked in the pane, and so does its assign', () => {
@@ -829,70 +821,192 @@ describe('In Progress', () => {
     ])
   })
 
-  test('no proof, someone else’s PR, a merged PR, a piece of a line, no stand file: dropped', () => {
-    for (const progress of [undefined, { pr: 133, repo: 'alpha' }, { pr: 160, repo: 'alpha' }, { pr: 999, repo: 'alpha' }, { standLine: 'Cache work' }, { standLine: 'x', pr: 174 }]) {
+  test('no proof, a PR that does not name the card, someone else’s PR, a merged PR: dropped', () => {
+    for (const progress of [undefined, { pr: 175, repo: 'alpha' }, { pr: 133, repo: 'alpha' }, { pr: 160, repo: 'alpha' }, { pr: 999, repo: 'alpha' }, { pr: 174 }]) {
       const { rows, dropped } = check([start('B1', progress)])
       expect([progress, rows]).toEqual([progress, []])
-      expect(dropped[0]).toContain('In Progress nur mit')
+      expect(dropped[0]).toContain('In Progress nur mit offenem PR')
     }
-    expect(check([start('B1', { standLine: 'Cache work runs on branch feature/cache' })], NO_CONTEXT).rows).toEqual([])
+    expect(check([start('B4', { pr: 174, repo: 'alpha' })]).rows).toEqual([])
     // From another bucket the rule does not apply.
     expect(check([start('B3')]).rows).toHaveLength(1)
   })
 })
 
-describe('the Sprint Backlog', () => {
-  const backlogCard = (id: string): Card => ({
+describe('the stand files', () => {
+  const ALPHA = [
+    '# Backlog',
+    '',
+    '## 2026-10-20 — Cache the Parsed Pages',
+    'A rerun should skip the parser.',
+    '',
+    '## 2026-10-21 — Tidy the `docs` Folder',
+    '',
+    '## 2026-10-22 — Twice Named',
+    '',
+    '## 2026-10-23 — Twice Named',
+    '',
+  ].join('\n')
+  const BETA = ['# Backlog', '', '## 2026-10-25 — Rerun the Bench', ''].join('\n')
+  const CACHE_AT = '2026-10-20 — Cache the Parsed Pages'
+  const stand = (next: string[], work: string[]) =>
+    ['# Stand', '', '## Erledigt', '- Cache the Parsed Pages', '- Rerun the Bench', '', '## In Arbeit', '', ...work, '', '## Nächster Schritt', '', ...next, ''].join('\n')
+  const alpha = (text: string | null): Stand => ({ file: 'alpha/backlog.md', name: 'extraktion.md', text })
+  const beta = (text: string | null): Stand => ({ file: 'beta/backlog.md', name: 'benchmark.md', text })
+  // A card whose board-src line names the entry; its title is not the entry's (card titles never count).
+  const card = async (id: string, heading: string, bucket: BucketKey, extra: Partial<Card> = {}, file = 'alpha/backlog.md'): Promise<Card> => ({
     id,
-    title: `Card ${id}`,
-    bucket: 'backlog',
+    title: `Extraktion: Card ${id}`,
+    bucket,
     percent: 0,
     assigned: 'none',
     createdBy: ME,
     etag: `W/"${id}"`,
-    details: { etag: `W/"${id}d"`, description: '', checklist: [] },
+    details: { etag: `W/"${id}d"`, description: `<!-- board-src: ${file}#${await sourceKey(heading)} -->\n\nbody`, checklist: [] },
+    ...extra,
   })
-  const cards: Card[] = [
-    backlogCard('S1'),
-    backlogCard('S2'),
-    backlogCard('S3'),
-    backlogCard('S4'),
-    { id: 'P1', title: 'Running', bucket: 'in_progress', percent: 0, assigned: 'none', createdBy: ME, etag: 'W/"p"', details: { etag: 'W/"pd"', description: '', checklist: [] } },
-  ]
-  const steps = nextStepsOf('# Stand\n\n## Nächster Schritt\n\n- Ship the **cache** work\n- Then tidy the docs.\n\n## Later\nnot this')
-  const ctx: Context = { ...NO_CONTEXT, nextSteps: steps }
-  const pull = (taskId: string, nextStep = 'ship the cache work') => ({ action: 'move', taskId, bucket: 'sprint_backlog', nextStep, evidence: 'Stand' })
-  const check = (rows: unknown[], on: Context = ctx) => {
-    const checked = checkProposal({ rows }, cards, [], CFG, on)
+  const run = async (stands: Stand[], cards: Card[], rows: unknown[] = []) => {
+    const entries = [...entriesOf('alpha/backlog.md', ALPHA), ...entriesOf('beta/backlog.md', BETA)]
+    const keys = new Map<string, string>()
+    for (const e of entries) keys.set(e.heading, await sourceKey(e.heading))
+    const checked = checkProposal({ rows }, cards, [], CFG, { entries, keys, hasSkill: true, stands })
     if (typeof checked === 'string') throw new Error(checked)
     return checked
   }
 
-  test('the section stops at the next heading of its level', () => {
-    expect(steps).toBe('- Ship the **cache** work\n- Then tidy the docs.')
-    expect(nextStepsOf('# Stand\nnothing')).toBeNull()
-  })
-
-  test('a pull from Backlog for a named next step goes, its evidence quoting the step', () => {
-    const { rows, dropped } = check([pull('S1')])
+  test('A1: a "Nächster Schritt" line with a backlog title moves its Backlog card to the Sprint Backlog, ticked', async () => {
+    const cards = [await card('S1', CACHE_AT, 'backlog')]
+    const { rows, dropped } = await run([alpha(stand(['- Cache the Parsed Pages'], []))], cards)
     expect(dropped).toEqual([])
-    expect(rows).toEqual([{ n: 1, action: 'move', taskId: 'S1', title: 'Card S1', etag: 'W/"S1"', detailsEtag: 'W/"S1d"', bucket: 'sprint_backlog', evidence: 'Nächster Schritt: „ship the cache work“ – Stand' }])
+    expect(rows).toEqual([
+      { n: 1, action: 'move', taskId: 'S1', title: 'Extraktion: Card S1', etag: 'W/"S1"', detailsEtag: 'W/"S1d"', bucket: 'sprint_backlog', evidence: 'Standdatei extraktion.md › Nächster Schritt: Cache the Parsed Pages' },
+    ])
+    expect(paneRows(rows, cards).map(r => [r.change, r.isChecked])).toEqual([['→ Sprint Backlog', true]])
   })
 
-  test('another bucket, a fourth pull, an assignment, a step not in the section, no standFile: dropped', () => {
-    expect(check([pull('P1')]).dropped[0]).toContain('nur aus Backlog')
-    const four = check([pull('S1'), pull('S2'), pull('S3', 'Then tidy the docs.'), pull('S4', '- then tidy the docs.')])
-    expect(four.rows).toHaveLength(3)
-    expect(four.dropped).toEqual(['Vorschlag 4: mehr als 3 Karten in den Sprint Backlog'])
-    const assigned = check([pull('S1'), { action: 'assign', taskId: 'S1' }])
-    expect(assigned.rows.map(r => r.action)).toEqual(['move'])
-    expect(assigned.dropped[0]).toContain('bleiben frei')
-    expect(check([pull('S1', 'release the parser')]).dropped[0]).toContain('nextStep')
-    // Only a whole line or bullet counts, never a piece of one.
-    for (const piece of ['the docs', 'tidy the docs', 'Ship the', 'cache']) {
-      expect([piece, check([pull('S1', piece)]).dropped[0]]).toEqual([piece, expect.stringContaining('nextStep')])
+  test('A1: a title without an entry, prose, a card already there or further right, someone else’s card: nothing', async () => {
+    const backlog = [await card('S1', CACHE_AT, 'backlog')]
+    for (const line of ['- Release the parser', 'Next we cache the parsed pages.', '- Cache the Parsed Pages, then the docs', '- **Cache the Parsed Pages**', '## Cache the Parsed Pages']) {
+      expect([line, (await run([alpha(stand([line], []))], backlog)).rows]).toEqual([line, []])
     }
-    expect(check([pull('S1')], NO_CONTEXT).dropped[0]).toContain('standFile')
+    for (const bucket of ['sprint_backlog', 'in_progress', 'in_review'] as BucketKey[]) {
+      expect([bucket, (await run([alpha(stand(['- Cache the Parsed Pages'], []))], [await card('S1', CACHE_AT, bucket)])).rows]).toEqual([bucket, []])
+    }
+    // A card in Done is read without details: no source line, no move.
+    const done = { ...(await card('S1', CACHE_AT, 'done')), details: undefined }
+    expect((await run([alpha(stand(['- Cache the Parsed Pages'], []))], [done])).rows).toEqual([])
+    for (const createdBy of [OTHER, undefined]) {
+      const theirs = await card('S1', CACHE_AT, 'backlog', { createdBy })
+      expect((await run([alpha(stand(['- Cache the Parsed Pages'], ['- Cache the Parsed Pages']))], [theirs])).rows).toEqual([])
+    }
+    // No card for the entry yet: nothing (the create comes first, the move in a later run).
+    expect((await run([alpha(stand(['- Cache the Parsed Pages'], []))], [])).rows).toEqual([])
+  })
+
+  test('A2: an "In Arbeit" line moves its card to In Progress and assigns it, both unticked; from the Sprint Backlog the same', async () => {
+    for (const bucket of ['backlog', 'sprint_backlog'] as BucketKey[]) {
+      const cards = [await card('W1', CACHE_AT, bucket)]
+      const { rows, dropped } = await run([alpha(stand([], ['* Cache the Parsed Pages']))], cards)
+      expect(dropped).toEqual([])
+      expect(rows.map(r => [r.n, r.action, 'taskId' in r ? r.taskId : '', r.action === 'move' ? r.bucket : '', r.evidence])).toEqual([
+        [1, 'move', 'W1', 'in_progress', 'Standdatei extraktion.md › In Arbeit: Cache the Parsed Pages'],
+        [2, 'assign', 'W1', '', 'Standdatei extraktion.md › In Arbeit: Cache the Parsed Pages'],
+      ])
+      expect(paneRows(rows, cards).map(r => [r.change, r.isChecked])).toEqual([
+        ['→ In Progress', false],
+        ['mir zuweisen', false],
+      ])
+    }
+    // Already the owner's: the move alone; someone else's: nothing; already running: nothing.
+    expect((await run([alpha(stand([], ['- Cache the Parsed Pages']))], [await card('W1', CACHE_AT, 'backlog', { assigned: 'owner' })])).rows.map(r => r.action)).toEqual(['move'])
+    expect((await run([alpha(stand([], ['- Cache the Parsed Pages']))], [await card('W1', CACHE_AT, 'backlog', { assigned: 'someone_else' })])).rows).toEqual([])
+    expect((await run([alpha(stand([], ['- Cache the Parsed Pages']))], [await card('W1', CACHE_AT, 'in_progress')])).rows).toEqual([])
+    // Named in both sections, or twice: In Arbeit wins, once.
+    const both = await run([alpha(stand(['- Cache the Parsed Pages'], ['- Cache the Parsed Pages', '- cache the parsed pages']))], [await card('W1', CACHE_AT, 'backlog')])
+    expect(both.rows.map(r => [r.action, r.action === 'move' ? r.bucket : ''])).toEqual([
+      ['move', 'in_progress'],
+      ['assign', ''],
+    ])
+  })
+
+  test('A3: a title counts only against its own source, as a whole line with list marker, case and spacing aside', async () => {
+    const mine = await card('S1', CACHE_AT, 'backlog')
+    const bench = await card('B1', '2026-10-25 — Rerun the Bench', 'backlog', {}, 'beta/backlog.md')
+    // The tablebench stand file names a techpdfparser title, and the other way round: nothing.
+    expect((await run([beta(stand(['- Cache the Parsed Pages'], []))], [mine, bench])).rows).toEqual([])
+    expect((await run([alpha(stand(['- Rerun the Bench'], []))], [mine, bench])).rows).toEqual([])
+    expect((await run([beta(stand(['- Rerun the Bench'], []))], [mine, bench])).rows.map(r => ('taskId' in r ? r.taskId : ''))).toEqual(['B1'])
+    for (const line of ['Cache the Parsed Pages', '- Cache the Parsed Pages', '* Cache the Parsed Pages', '1. cache the   parsed PAGES ', '   - Cache the Parsed Pages']) {
+      expect([line, (await run([alpha(stand([line], []))], [mine])).rows.length]).toEqual([line, 1])
+    }
+    // Backticks in the title count.
+    const docs = await card('D1', '2026-10-21 — Tidy the `docs` Folder', 'backlog')
+    expect((await run([alpha(stand(['- Tidy the `docs` Folder'], []))], [docs])).rows).toHaveLength(1)
+    expect((await run([alpha(stand(['- Tidy the docs Folder'], []))], [docs])).rows).toEqual([])
+    // Two entries with one title, or two cards on one entry: nothing.
+    expect((await run([alpha(stand(['- Twice Named'], []))], [await card('T1', '2026-10-22 — Twice Named', 'backlog')])).rows).toEqual([])
+    expect((await run([alpha(stand(['- Cache the Parsed Pages'], []))], [mine, await card('S2', CACHE_AT, 'backlog')])).rows).toEqual([])
+  })
+
+  test('A4: the model’s moves into the Sprint Backlog and its starts by a stand line are dropped with their reason', async () => {
+    const cards = [await card('S1', CACHE_AT, 'backlog')]
+    const { rows, dropped } = await run([], cards, [
+      { action: 'move', taskId: 'S1', bucket: 'sprint_backlog', evidence: 'x' },
+      { action: 'move', taskId: 'S1', bucket: 'sprint_backlog', nextStep: 'Cache the Parsed Pages', evidence: 'x' },
+      { action: 'move', taskId: 'S1', bucket: 'in_progress', progress: { standLine: 'Cache the Parsed Pages' }, evidence: 'x' },
+    ])
+    expect(rows).toEqual([])
+    expect(dropped).toEqual([
+      'Vorschlag 1: in den Sprint Backlog verschiebt nur der Mod (Standdatei, Abschnitt Nächster Schritt)',
+      'Vorschlag 2: in den Sprint Backlog verschiebt nur der Mod (Standdatei, Abschnitt Nächster Schritt)',
+      'Vorschlag 3: In Progress nur mit offenem PR von owner-login als Beleg (Standdatei-Zeilen verschiebt der Mod selbst)',
+    ])
+    const system = systemPrompt(CFG, null)
+    expect(system).toContain('never move a card to sprint_backlog')
+    expect(system).not.toContain('standLine')
+    expect(system).not.toContain('nextStep')
+  })
+
+  test('W8: a model move of the same card wins; mod rows carry the read’s etags, unique numbers, and the row limit never cuts them', async () => {
+    const work = alpha(stand([], ['- Cache the Parsed Pages']))
+    const cards = [await card('S1', CACHE_AT, 'backlog')]
+    for (const bucket of ['done', 'in_review']) {
+      const { rows } = await run([work], cards, [{ action: 'move', taskId: 'S1', bucket, evidence: 'PR' }])
+      expect([bucket, rows.map(r => [r.action, r.action === 'move' ? r.bucket : ''])]).toEqual([bucket, [['move', bucket]]])
+    }
+    // The model's assign stands (the card moves to In Progress), the mod adds no second one.
+    const assigned = await run([work], cards, [{ action: 'assign', taskId: 'S1', evidence: 'x' }])
+    expect(assigned.rows.map(r => r.action)).toEqual(['assign', 'move'])
+    // 31 model rows and the mod's two: 28 of the model's, then the mod's, numbered 1 to 30.
+    const filler = Array.from({ length: 31 }, (_, i): Card => ({ ...cards[0], id: `F${i}`, title: `Filler ${i}`, bucket: 'in_progress', etag: `W/"f${i}"`, details: { etag: `W/"f${i}d"`, description: '', checklist: [] } }) as Card)
+    const full = await run([work], [...cards, ...filler], filler.map(c => ({ action: 'percent', taskId: c.id, percent: 50, evidence: 'x' })))
+    expect(full.rows).toHaveLength(MAX_ROWS)
+    expect(full.rows.map(r => r.n)).toEqual(Array.from({ length: MAX_ROWS }, (_, i) => i + 1))
+    expect(full.rows.slice(-2).map(r => [r.action, 'taskId' in r ? r.taskId : ''])).toEqual([
+      ['move', 'S1'],
+      ['assign', 'S1'],
+    ])
+    expect(full.dropped).toEqual(['3 Vorschläge über der Grenze von 30'])
+    // Only the fields apply.py takes for a move and an assign.
+    expect(full.rows.slice(-2).map(r => Object.keys(r).sort().join())).toEqual([
+      'action,bucket,detailsEtag,etag,evidence,n,taskId,title',
+      'action,detailsEtag,etag,evidence,n,taskId,title',
+    ])
+  })
+
+  test('W9: a stand file unreadable or without a section moves nothing for its source and says so; the other source goes on', async () => {
+    const noWork = '# Stand\n\n## Nächster Schritt\n- Rerun the Bench\n'
+    expect(standNotices([alpha(null), beta(noWork), alpha(stand([], []))])).toEqual(['extraktion.md: nicht lesbar', 'benchmark.md: kein Abschnitt In Arbeit'])
+    const cards = [await card('S1', CACHE_AT, 'backlog'), await card('B1', '2026-10-25 — Rerun the Bench', 'backlog', {}, 'beta/backlog.md')]
+    const { rows } = await run([alpha(stand(['- Cache the Parsed Pages'], [])), beta(noWork)], cards)
+    expect(rows.map(r => ('taskId' in r ? r.taskId : ''))).toEqual(['S1'])
+    expect((await run([alpha(null)], cards)).rows).toEqual([])
+  })
+
+  test('a section runs to the next heading of level 1 or 2; its own subheadings stay inside', () => {
+    expect(standSection('# S\n## In Arbeit\n- a\n### Detail\n- b\n## Erledigt\n- c\n', 'In Arbeit')).toEqual(['- a', '### Detail', '- b'])
+    expect(standSection('# S\n##  in   arbeit \n- a', 'In Arbeit')).toEqual(['- a'])
+    expect(standSection('# S\n### In Arbeit\n- a\n', 'In Arbeit')).toBeNull()
   })
 })
 
@@ -909,6 +1023,9 @@ describe('config', () => {
       { ...CONFIG_FILE, backlogSources: [{ repo: 'gamma', path: 'backlog.md', ref: 'main' }] },
       { ...CONFIG_FILE, backlogSources: [{ repo: 'alpha', path: '../x', ref: 'main' }] },
       { ...CONFIG_FILE, statusFiles: ['relative.md'] },
+      { ...CONFIG_FILE, backlogSources: [{ repo: 'alpha', path: 'backlog.md', ref: 'main', stand: 'stand.md' }] },
+      { ...CONFIG_FILE, backlogSources: [{ repo: 'alpha', path: 'backlog.md', ref: 'main', stand: '~/notes/../x.md' }] },
+      { ...CONFIG_FILE, changelog: { repo: 'alpha', path: 'CHANGELOG.md', ref: 'main', stand: '~/notes/stand.md' } },
       { ...CONFIG_FILE, extraStatuses: ['open'] },
       { ...CONFIG_FILE, surprise: true },
     ]
@@ -916,6 +1033,14 @@ describe('config', () => {
       expect(typeof parseConfig(JSON.stringify(value))).toBe('string')
     }
     expect(parseConfig('{')).toBe('kein JSON')
+  })
+
+  test('W1/W11: each backlog source names its stand file; the old top-level standFile is accepted and ignored', () => {
+    expect(CFG.backlogSources[0]?.stand).toBe('~/notes/stand.md')
+    const old = parseConfig(JSON.stringify({ ...CONFIG_FILE, standFile: '~/notes/status.md' }))
+    if (typeof old === 'string') throw new Error(old)
+    expect('standFile' in old).toBe(false)
+    expect(old.backlogSources).toEqual(CFG.backlogSources)
   })
 })
 
@@ -1289,6 +1414,44 @@ describe('a board run in the pane', () => {
     expect(seen.prompts).toEqual([])
   })
 
+  test('a stand file line shows as the mod’s own move, ticked, the line as its evidence', async ($, on) => {
+    const T_CACHE = 'TaskCache000000000000001'
+    const description = `<!-- board-src: alpha/backlog.md#${await sourceKey(CACHE)} -->\n\nx`
+    const stand = '# Stand\n\n## In Arbeit\n\n## Nächster Schritt\n- Cache the Parsed Pages\n'
+    const seen = world(on, { reply: '{"rows":[]}', backlog: BACKLOG, stand, tasks: [...TASKS, task(T_CACHE, 'Extraktion: Cache', 'backlog')], descriptions: { [T_CACHE]: description } })
+    await start($, false)
+    await board($)
+    const view = await pane($)
+
+    const ready = await until(seen, view, 'Übernehmen (1)')
+    expect(ready).toContain('[x]')
+    expect(ready).toContain('→ Sprint Backlog')
+    await view.press({ key: 'row:1' })
+    await until(seen, view, 'Beleg: Standdatei stand.md › Nächster Schritt: Cache the Parsed Pages')
+    const document = JSON.parse(seen.files.get(`${DIR}/proposals-${stamped}.json`) ?? '{}')
+    expect(document.rows).toEqual([
+      { n: 1, action: 'move', taskId: T_CACHE, title: 'Extraktion: Cache', etag: `W/"t${T_CACHE}"`, detailsEtag: `W/"d${T_CACHE}"`, bucket: 'sprint_backlog', evidence: 'Standdatei stand.md › Nächster Schritt: Cache the Parsed Pages' },
+    ])
+  })
+
+  for (const [stand, notice] of [
+    [null, 'stand.md: nicht lesbar'],
+    ['# Stand\n\n## Nächster Schritt\n- Cache the Parsed Pages\n', 'stand.md: kein Abschnitt In Arbeit'],
+  ] as const) {
+    test(`a stand file ${stand === null ? 'that cannot be read' : 'without a section'} moves nothing; the run goes on and says why`, async ($, on) => {
+      const T_CACHE = 'TaskCache000000000000001'
+      const description = `<!-- board-src: alpha/backlog.md#${await sourceKey(CACHE)} -->\n\nx`
+      const seen = world(on, { reply: '{"rows":[]}', backlog: BACKLOG, stand, tasks: [...TASKS, task(T_CACHE, 'Extraktion: Cache', 'backlog')], descriptions: { [T_CACHE]: description } })
+      await start($, false)
+      await board($)
+      const view = await pane($)
+
+      const done = await until(seen, view, 'Keine Änderungen vorgeschlagen')
+      expect(done).toContain(notice)
+      expect(seen.prompts).toHaveLength(1)
+    })
+  }
+
   for (const config of [null, '{', JSON.stringify({ ...CONFIG_FILE, planId: 'bad id' })]) {
     test(`a ${config === null ? 'missing' : 'broken'} config stops before anything is read`, async ($, on) => {
       const seen = world(on, { config })
@@ -1391,7 +1554,6 @@ describe('a board run in the pane', () => {
     expect(seen.prompts[0]?.system).toContain('The user story is exactly "As a developer, I want to <goal> so that <value>."')
     expect(seen.prompts[0]?.system).toContain('"userStory":"As a developer, I want to set up Qdrant as the local vector store')
     expect(seen.prompts[0]?.system).toContain('Before you answer, check every create against this template')
-    expect(seen.prompts[0]?.prompt).toContain('## Next steps (the stand file\'s section)\nWrite the parser docs next.')
     await view.press({ key: 'row:1' })
     const open = await until(seen, view, `Quelle: alpha/backlog.md › ${CACHE}`)
     expect(open).toContain('A rerun should skip the parser.')

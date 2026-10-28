@@ -503,6 +503,12 @@ class Configuration(Base):
         cfg = apply.load_config(self.config_path)
         self.assertEqual(sorted(cfg.buckets), sorted(apply.BUCKET_KEYS))
 
+    def test_a_stand_file_per_source_and_the_old_stand_file_key_hold(self):
+        source = {"repo": "alpha", "path": "backlog.md", "ref": "main", "stand": "~/notes/stand.md"}
+        self.write_config(config(backlogSources=[source], standFile="~/notes/status.md"))
+        cfg = apply.load_config(self.config_path)
+        self.assertEqual(cfg.plan_id, PLAN)
+
     def test_a_status_or_repo_the_config_does_not_name_is_refused(self):
         for marker in ({"status": "mystery"}, {**MARKER, "repo": "gamma"}):
             g = FakeGraph([task(T1)])
