@@ -63,7 +63,8 @@ const CONTROL_RE = new RegExp('[\\x00-\\x1f\\x7f-\\x9f\\u061c\\u180e\\u200b-\\u2
 // ---- the config ---------------------------------------------------------
 
 // `local`: read this working copy instead of the branch head on GitHub (a gitignored backlog has no other).
-export type RepoFile = { repo: string; path: string; ref: string; local?: string }
+// `label`: the word a new card's title starts with ("Extraktion: …"), so the board shows where it comes from.
+export type RepoFile = { repo: string; path: string; ref: string; local?: string; label?: string }
 
 /** The owner's config (~/.claude/board/config.json), checked; apply.py reads the same file. */
 export type Config = {
@@ -107,7 +108,8 @@ function repoFile(value: unknown, repos: Record<string, string>): RepoFile | nul
   if (typeof value !== 'object' || value === null) return null
   const f = value as Record<string, unknown>
   const isOk =
-    Object.keys(f).every(k => ['repo', 'path', 'ref', 'local'].includes(k)) &&
+    Object.keys(f).every(k => ['repo', 'path', 'ref', 'local', 'label'].includes(k)) &&
+    (f.label === undefined || (typeof f.label === 'string' && /^[A-Za-zÄÖÜäöüß0-9 -]{1,30}$/.test(f.label))) &&
     (f.local === undefined || (typeof f.local === 'string' && f.local.length > 0 && !f.local.includes('\n') && !f.local.includes('..'))) &&
     typeof f.repo === 'string' &&
     f.repo in repos &&
@@ -120,6 +122,7 @@ function repoFile(value: unknown, repos: Record<string, string>): RepoFile | nul
   if (!isOk) return null
   const file: RepoFile = { repo: f.repo as string, path: f.path as string, ref: f.ref as string }
   if (typeof f.local === 'string') file.local = f.local
+  if (typeof f.label === 'string') file.label = f.label
   return file
 }
 
@@ -885,12 +888,15 @@ export function checkProposal(raw: unknown, cards: Card[], prs: Pr[], cfg: Confi
         drop(at, r, `doneTasks nur wörtlich aus tasks`)
         continue
       }
-      const title = r.title as string
       const src = sourceFrom(r.source, ctx)
       if (typeof src === 'string') {
         drop(at, r, `${src}`)
         continue
       }
+      // The source's label leads the title, set here and not by the model.
+      const label = cfg.backlogSources.find(f => `${f.repo}/${f.path}` === src.file)?.label
+      const bare = r.title as string
+      const title = label === undefined || bare.startsWith(`${label}: `) ? bare : `${label}: ${bare}`
       if (sources.has(`${src.file}#${src.key}`)) {
         drop(at, r, `Quelle „${clean(src.heading, 60)}“ hat schon eine Karte`)
         continue

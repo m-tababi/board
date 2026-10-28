@@ -597,6 +597,16 @@ describe('new cards in the create-backlog format', () => {
     expect(await sourceKey(CACHE)).toBe('1edc5164ebbd')
   })
 
+  test('the source label leads a new title, once', async () => {
+    const ctx = await contextFor(BACKLOG)
+    const cfg = { ...CFG, backlogSources: CFG.backlogSources.map(f => ({ ...f, label: 'Extraktion' })) }
+    for (const title of ['Cache the Parsed Pages', 'Extraktion: Cache the Parsed Pages']) {
+      const checked = checkProposal({ rows: [create({ title })] }, cards, [], cfg, ctx)
+      if (typeof checked === 'string') throw new Error(checked)
+      expect(checked.rows.map(r => r.title)).toEqual(['Extraktion: Cache the Parsed Pages'])
+    }
+  })
+
   test('a valid card keeps its fields and names its source entry', async () => {
     const { rows, dropped } = check([create()], await contextFor(BACKLOG))
     expect(dropped).toEqual([])
